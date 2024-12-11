@@ -3,7 +3,7 @@ function [out,Mot,outpath,file_name,A]=Simulate_Ca_video(varargin)
 % Simulate_Ca_video('Nneu',50,'ses',1,'F',18000,'LFP',8,'spike_prob',[-4.91,0.83],'sf',60);
 % Simulate_Ca_video('Nneu',300,'ses',20,'F',1500,'motion',0,'min_dist',2,'spike_prob',[-2,0.83],'A2',true,'overlap',0.2);
 % Simulate_Ca_video_main(Inputs);
-% Simulate_Ca_video('Nneu',200,'ses',1,'F',3000,'save_files',false);
+% Simulate_Ca_video('Nneu',100,'ses',2,'F',3000,'save_files',true,'motion',4,'translation',10);
 
 % V=Simulate_Ca_video('save_files',false,raw_data{1,:});
 opt=int_var(varargin);

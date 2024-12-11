@@ -20,11 +20,13 @@ end
 img1=mat2gray(imgaussfilt(randn(d1,d2),msz,'FilterSize',2001,'Padding','circular'));
 [Gx,Gy] = imgradientxy(img1);
 if translation>0
-Gx=(mat2gray(Gx)-0.5)*2*magnitude+magnitude;
-Gy=(mat2gray(Gy)-0.5)*2*magnitude+magnitude;
+    T=randn(1,2);
+    T=T*(translation/sqrt(sum(T.^2)));
+    Gx=(mat2gray(Gx)-0.5)*2*magnitude+T(1);
+    Gy=(mat2gray(Gy)-0.5)*2*magnitude+T(2);
 else
-Gx=(mat2gray(Gx)-0.5)*2*magnitude;
-Gy=(mat2gray(Gy)-0.5)*2*magnitude;
+    Gx=(mat2gray(Gx)-0.5)*2*magnitude;
+    Gy=(mat2gray(Gy)-0.5)*2*magnitude;
 end
 D=[];
 D(:,:,1)=Gy;
