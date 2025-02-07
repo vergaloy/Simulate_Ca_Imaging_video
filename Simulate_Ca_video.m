@@ -3,7 +3,7 @@ function [out,Mot,outpath,file_name,A]=Simulate_Ca_video(varargin)
 % Simulate_Ca_video('Nneu',50,'ses',1,'F',18000,'LFP',8,'spike_prob',[-4.91,0.83],'sf',60);
 % Simulate_Ca_video('Nneu',300,'ses',20,'F',1500,'motion',0,'min_dist',2,'spike_prob',[-2,0.83],'A2',true,'overlap',0.2);
 % Simulate_Ca_video_main(Inputs);
-% Simulate_Ca_video('Nneu',100,'ses',2,'F',3000,'save_files',true,'motion',4,'translation',10);
+% Simulate_Ca_video('Nneu',100,'ses',4,'F',500,'save_files',true,'motion',2,'translation',15,'overlap',0.5);
 
 % V=Simulate_Ca_video('save_files',false,raw_data{1,:});
 opt=int_var(varargin);
@@ -40,7 +40,7 @@ PNR=opt.PNR;
 mult=0.8;  %% BL proportion to total signal.
 for i=1:opt.ses
     V=v2uint8(reshape(reshape(A{i},d1*d2,[])*C(:,ix1:ix2),d1,d2,[])+...
-    reshape(reshape(bA{i},d1*d2,[])*C(:,ix1:ix2),d1,d2,[]));
+        reshape(reshape(bA{i},d1*d2,[])*C(:,ix1:ix2),d1,d2,[]));
     tn=N(:,:,ix1:ix2);
     FV=mult*BL(:,:,i)+  (1-mult)*(V)*(1/(1/PNR+1))   +   (1-mult)*tn*(1-1/(1/PNR+1)); %add data
     FV=v2uint8(FV);  %
@@ -61,9 +61,18 @@ if opt.save_files
 
     file_name=datestr(now,'yymmdd_HHMMSS');
     for i=1:opt.ses
-        saveash5(out{1,i}+1,[file_name,'_ses',sprintf( '%02d',i-1),'_mc']);
+        if opt.save_avi
+            save_as_avi(out{1,i}+1,[file_name,'_ses',sprintf( '%02d',i-1),'_mc.avi']);
+        else
+            saveash5(out{1,i}+1,[file_name,'_ses',sprintf( '%02d',i-1),'_mc']);
+        end
     end
-    saveash5(GT+1,[file_name,'_GT']);
+    if opt.save_avi
+        save_as_avi(GT+1,[file_name,'_GT.avi'])
+    else
+
+        saveash5(GT+1,[file_name,'_GT']);
+    end
     save([file_name,'.mat'],'A_GT','A','C','S','BL','opt','Mot','LFP','-v7.3');
 else
     file_name=[];
@@ -78,7 +87,7 @@ valid_v = @(x) isnumeric(x);
 addParameter(inp, 'outpath', [])               % Output path where simulation results will be saved
 addParameter(inp, 'min_dist', 8, valid_v)      % Minimum distance between neurons in the simulated data
 addParameter(inp, 'Nneu', 50, valid_v)         % Number of neurons (or neural units) to be simulated
-addParameter(inp, 'PNR', 10, valid_v)          % Peak-to-Noise Ratio (signal-to-noise ratio) for the simulated data
+addParameter(inp, 'PNR', 2, valid_v)          % Peak-to-Noise Ratio (signal-to-noise ratio) for the simulated data
 addParameter(inp, 'd', [220, 300], valid_v)    % Dimensions of the simulated video frames (width and height) in pixels
 addParameter(inp, 'F', 1000, valid_v)          % Frame rate (frames per second) for the simulated calcium video data in each session
 addParameter(inp, 'overlap', 1, valid_v)       % Proportion of neurons remapping across multiple sessions
@@ -101,9 +110,9 @@ addParameter(inp, 'invtRise', [2.08, 0.29], valid_v)   % Parameters related to t
 addParameter(inp, 'invtDecay', [0.55, 0.44], valid_v) % Parameters related to the decaying phase of calcium signals (log scale)
 addParameter(inp, 'disappearBV', 0, valid_v)   % Erode BV
 addParameter(inp, 'CA1_A', false)              % Change neurons shapes across sessions. Utilize CA1 data
-addParameter(inp, 'A2', true)                  % Use CA1 neurons shapes instead of DG. 
+addParameter(inp, 'A2', false)                  % Use CA1 neurons shapes instead of DG.
 addParameter(inp, 'force_active', 1)           % All nuerons should have at least one Calcium transient per session (unless remapping)
-
+addParameter(inp, 'save_avi', 1)           % Save as avi. otherwise save as .h5
 varargin=varargin{1, 1};
 
 inp.KeepUnmatched = true;
@@ -116,10 +125,10 @@ s=rng(opt.seed,'twister');
 s=rng(opt.seed,'twister');
 opt.seed=s.Seed;
 while 1
-s=rng(opt.seed,'twister');
-if s.Seed==opt.seed
-    break
-end
+    s=rng(opt.seed,'twister');
+    if s.Seed==opt.seed
+        break
+    end
 end
 s.Seed
 
@@ -130,7 +139,7 @@ if opt.save_files
     if isempty(opt.outpath)
         outpath = uigetdir(pwd,'select output folder');
     else
-    outpath=opt.outpath;
+        outpath=opt.outpath;
     end
     cd(outpath);
 else
@@ -201,7 +210,7 @@ end
 C=C.*M;
 
 if opt.drift==1
-     M=sim_drifting_activities(Nneu2,ses);
+    M=sim_drifting_activities(Nneu2,ses);
     M=double(repelem(M,1,F));
     C=C.*M;
 end
