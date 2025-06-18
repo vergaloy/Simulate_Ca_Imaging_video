@@ -5,6 +5,8 @@ function [out,Mot,outpath,file_name,A]=Simulate_Ca_video(varargin)
 % Simulate_Ca_video_main(Inputs);
 % Simulate_Ca_video('Nneu',100,'ses',4,'F',500,'save_files',true,'motion',2,'translation',15,'overlap',0.5);
 
+% V=Simulate_Ca_video('Nneu',100,'ses',2,'F',6000,'save_files',true);
+
 % V=Simulate_Ca_video('save_files',false,raw_data{1,:});
 opt=int_var(varargin);
 outpath=get_out_path(opt);
