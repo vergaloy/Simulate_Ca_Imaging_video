@@ -1,106 +1,110 @@
-function [Mot, outpath, file_name, A] = Simulate_Ca_video(varargin)
-% Simulate_Ca_video generates synthetic calcium imaging videos with optional motion and remapping.
-% It simulates neural activity, motion artifacts, baseline variability, and saves session-wise videos and metadata.
-
-% Example usages:
+function [out,Mot,outpath,file_name,A]=Simulate_Ca_video(varargin)
 % Simulate_Ca_video('motion',0,'Nneu',100,'ses',2,'CA1_A',true,'PNR',1);
-% Simulate_Ca_video('Nneu',300,'ses',20,'F',1500,...);
-% V = Simulate_Ca_video('save_files',false,raw_data{1,:});
+% Simulate_Ca_video('Nneu',50,'ses',1,'F',18000,'LFP',8,'spike_prob',[-4.91,0.83],'sf',60);
+% Simulate_Ca_video('Nneu',300,'ses',20,'F',1500,'motion',0,'min_dist',2,'spike_prob',[-2,0.83],'A2',true,'overlap',0.2);
+% Simulate_Ca_video_main(Inputs);
+% Simulate_Ca_video('Nneu',100,'ses',4,'F',500,'save_files',true,'motion',2,'translation',15,'overlap',0.5);
 
-% Parse inputs and initialize options
-opt = int_var(varargin);
-outpath = get_out_path(opt);  % choose output folder if saving enabled
+% V=Simulate_Ca_video('Nneu',100,'ses',2,'F',6000,'save_files',true);
 
-%% Generate synthetic data
-bl = create_baseline(opt);  % create session-specific background baselines
-[A_GT, bA_GT, C, S, LFP] = create_neuron_data(opt);  % simulate neurons and temporal traces
-opt.Nneu2 = size(A_GT{1,1}, 3);  % store number of neurons
+% V=Simulate_Ca_video('save_files',false,raw_data{1,:});
+opt=int_var(varargin);
+outpath=get_out_path(opt);
 
-C = add_remapping_drifting(C, opt);  % apply remapping or activity drift if needed
+%% Create Baselines for two sessions;
+bl=create_baseline(opt);
+%% create neural data
+[A_GT,bA_GT,C,S,LFP]=create_neuron_data(opt);
+opt.Nneu2=size(A_GT{1,1},3);
+%% Apply overlapping mask to C
+C=add_remapping_drifting(C,opt);
 
-% Apply synthetic non-rigid motion to neuron components for each session
-[BL(:,:,1), A{1,1}, bA{1,1}, Mot{1}] = Add_NRmotion(bl(:,:,1), A_GT{1}, bA_GT{1}, ...
-    0, opt.plotme, opt.translation, opt.motion_sz);
-for i = 2:opt.ses
-    [BL(:,:,i), A{1,i}, bA{1,i}, Mot{i}] = Add_NRmotion(bl(:,:,i), A_GT{i}, bA_GT{i}, ...
-        opt.motion, opt.plotme, opt.translation, opt.motion_sz);
+%% add Non-Rigid motion to sessions
+[BL(:,:,1),A{1,1},bA{1,1},Mot{1}]=Add_NRmotion(bl(:,:,1),A_GT{1},bA_GT{1},0,opt.plotme,opt.translation,opt.motion_sz);
+for i=2:opt.ses
+    [BL(:,:,i),A{1,i},bA{1,i},Mot{i}]=Add_NRmotion(bl(:,:,i),A_GT{i},bA_GT{i},opt.motion,opt.plotme,opt.translation,opt.motion_sz);
 end
-BL = v2uint8(BL);  % convert baseline to uint8
+BL=v2uint8(BL);
 
-[d1, d2] = size(BL(:,:,1));  % get spatial dimensions
-
-%% Simulate each session one-by-one (memory-efficient)
-file_name = datestr(now, 'yymmdd_HHMMSS');  % timestamp-based base filename
-ix1 = 1; F = opt.F; ix2 = F;
-PNR = opt.PNR; mult = 0.8;
+%% get dimensions
+[d1,d2]=size(BL(:,:,1));
+%% Integrate model
+file_name = datestr(now, 'yymmdd_HHMMSS');
+ix1 = 1;
+F = opt.F;
+ix2 = F;
+PNR = opt.PNR;
+mult = 0.8;
 
 if opt.save_files
-    % Prepare memory-mapped file for writing GT frames incrementally
+    % Create matfile for GT with memory-mapped access
     matGT = matfile([file_name '_GT.mat'], 'Writable', true);
 end
 
+%% Process sessions one at a time
 for i = 1:opt.ses
-    % --- Generate simulated session data ---
+    % --- Simulate output video ---
     V = v2uint8(reshape(reshape(A{i}, d1*d2, []) * C(:, ix1:ix2), d1, d2, []) + ...
-        reshape(reshape(bA{i}, d1*d2, []) * C(:, ix1:ix2), d1, d2, []));
+                reshape(reshape(bA{i}, d1*d2, []) * C(:, ix1:ix2), d1, d2, []));
 
-    % Add smoothed noise
     N = rand(d1, d2, F, 'single');
     N = imgaussfilt(N);
     N = N - mean(N, 3);
     N = v2uint8(N);
 
-    % Combine neural signal, noise, and baseline
     FV = mult * BL(:, :, i) + ...
-        (1 - mult) * V * (1 / (1 / PNR + 1)) + ...
-        (1 - mult) * N * (1 - 1 / (1 / PNR + 1));
+         (1 - mult) * V * (1 / (1 / PNR + 1)) + ...
+         (1 - mult) * N * (1 - 1 / (1 / PNR + 1));
     FV = v2uint8(FV);
 
-    % --- Save session output video ---
+    % --- Save session movie ---
     if opt.save_avi
         save_as_avi(FV + 1, [file_name '_ses' sprintf('%02d', i-1) '_mc.avi']);
     else
         saveash5(FV + 1, [file_name '_ses' sprintf('%02d', i-1) '_mc']);
     end
 
-    % --- Ground truth generation ---
-    tA = A_GT{i}(21:end-20, 21:end-20, :);     % crop edges
+    % --- Generate ground truth for session ---
+    tA  = A_GT{i}(21:end-20, 21:end-20, :);
     tbA = bA_GT{i}(21:end-20, 21:end-20, :);
     V_GT = v2uint8(reshape(reshape(tA, d1*d2, []) * C(:, ix1:ix2), d1, d2, []) + ...
-        reshape(reshape(tbA, d1*d2, []) * C(:, ix1:ix2), d1, d2, []));
+                   reshape(reshape(tbA, d1*d2, []) * C(:, ix1:ix2), d1, d2, []));
+    GTi = V_GT * (1 / (1 / PNR + 1)) + N * (1 - 1 / (1 / PNR + 1));
+    GTi = v2uint8(GTi);
 
-    % Write GT session to disk incrementally
+    % --- Write GT slice to matfile ---
     if opt.save_files
         if i == 1
             matGT.GT = zeros(d1, d2, F * opt.ses, 'uint8');  % preallocate on disk
         end
-        matGT.GT(:, :, ix1:ix2) = V_GT;  % memory-safe write
+        matGT.GT(:, :, ix1:ix2) = GTi;
     end
 
-    % Update frame index
+    % Update indices
     ix1 = ix1 + F;
     ix2 = ix2 + F;
 
-    % Clean session variables from memory
-    clear V N FV V_GT tA tbA
+    % Clean up
+    clear V N FV V_GT GTi tA tbA
 end
 
-%% Final saving
+%% Final Save: GT as video and other variables
 if opt.save_files
-    % Save full GT video
+    % Save GT video (from disk-mapped .mat file)
     if opt.save_avi
         save_as_avi(matGT.GT + 1, [file_name '_GT.avi']);
     else
         saveash5(matGT.GT + 1, [file_name '_GT']);
     end
 
-    % Save simulation metadata (everything else)
+    % Save experiment metadata in separate .mat file
     save([file_name '_meta.mat'], 'A_GT', 'A', 'C', 'S', 'BL', 'opt', 'Mot', 'LFP', '-v7.3');
 else
     file_name = [];
 end
 
 end
+
 function opt=int_var(varargin)
 %% INTIALIZE VARIABLES
 inp = inputParser;
@@ -197,6 +201,7 @@ else
     end
 
 end
+
 
 if opt.disappearBV>0
     for i=1:size(bl,3)
