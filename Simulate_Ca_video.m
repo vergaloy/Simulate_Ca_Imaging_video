@@ -1,9 +1,9 @@
-function [Mot, outpath, file_name, A] = Simulate_Ca_video(varargin)
-% Simulate_Ca_video generates synthetic calcium imaging videos with optional motion and remapping.
-% It simulates neural activity, motion artifacts, baseline variability, and saves session-wise videos and metadata.
+function [Mot, outpath, file_name, A, GT_motion_xy] = Simulate_Ca_video(varargin)
+% Simulate_Ca_video generates synthetic calcium imaging videos with optional across-session misalignment, within-session motion, and remapping.
+% It simulates neural activity, misalignment artifacts, baseline variability, and saves session-wise videos and metadata.
 
 % Example usages:
-% Simulate_Ca_video('motion',0,'Nneu',100,'ses',2,'CA1_A',true,'PNR',1);
+% Simulate_Ca_video('NR_misalignment',0,'Nneu',100,'ses',2,'CA1_A',true,'PNR',1);
 % Simulate_Ca_video('Nneu',300,'ses',20,'F',1500,...);
 % V = Simulate_Ca_video('save_files',false,raw_data{1,:});
 
@@ -18,16 +18,18 @@ opt.Nneu2 = size(A_GT{1,1}, 3);  % store number of neurons
 
 C = add_remapping_drifting(C, opt);  % apply remapping or activity drift if needed
 
-% Apply synthetic non-rigid motion to neuron components for each session
+% Apply synthetic non-rigid misalignment to neuron components for each session
 [BL(:,:,1), A{1,1}, bA{1,1}, Mot{1}] = Add_NRmotion(bl(:,:,1), A_GT{1}, bA_GT{1}, ...
-    0, opt.plotme, opt.translation, opt.motion_sz);
+    0, opt.plotme, opt.translation_misalignment, opt.motion_sz);
 for i = 2:opt.ses
     [BL(:,:,i), A{1,i}, bA{1,i}, Mot{i}] = Add_NRmotion(bl(:,:,i), A_GT{i}, bA_GT{i}, ...
-        opt.motion, opt.plotme, opt.translation, opt.motion_sz);
+        opt.NR_misalignment, opt.plotme, opt.translation_misalignment, opt.motion_sz);
 end
 BL = v2uint8(BL);  % convert baseline to uint8
 
 [d1, d2] = size(BL(:,:,1));  % get spatial dimensions
+
+GT_motion_xy = cell(1, opt.ses);  % store within-session motion ground truth
 
 %% Simulate each session one-by-one (memory-efficient)
 file_name = datestr(now, 'yymmdd_HHMMSS');  % timestamp-based base filename
@@ -56,11 +58,34 @@ for i = 1:opt.ses
         (1 - mult) * N * (1 - 1 / (1 / PNR + 1));
     FV = v2uint8(FV);
 
-    % --- Save session output video ---
-    if opt.save_avi
-        save_as_avi(FV + 1, [file_name '_ses' sprintf('%02d', i-1) '_mc.avi']);
+    % Apply within-session translational motion if requested
+    if opt.session_motion_std > 0
+        prev_rng = rng;
+        if isempty(opt.session_motion_seed)
+            seed_i = opt.seed + i;
+        else
+            seed_i = opt.session_motion_seed + i - 1;
+        end
+        [dx, dy] = make_xy_motion_ar(F, opt.session_motion_phi, opt.session_motion_std, ...
+            opt.session_motion_max, seed_i);
+        rng(prev_rng);
+        FV = apply_xy_translation(single(FV), dx, dy);
+        FV = v2uint8(FV);
+        GT_motion_xy{i} = {dx, dy};
     else
-        saveash5(FV + 1, [file_name '_ses' sprintf('%02d', i-1) '_mc']);
+        GT_motion_xy{i} = [];
+    end
+
+    % --- Save session output video ---
+    if opt.session_motion_std==0
+        mc_tag='_mc';
+    else
+        mc_tag='';
+    end
+    if opt.save_avi
+        save_as_avi(FV + 1, [file_name '_ses' sprintf('%02d', i-1) mc_tag '.avi']);
+    else
+        saveash5(FV + 1, [file_name '_ses' sprintf('%02d', i-1) mc_tag]);
     end
 
     % --- Ground truth generation ---
@@ -95,7 +120,7 @@ if opt.save_files
     end
 
     % Save simulation metadata (everything else)
-    save([file_name '_meta.mat'], 'A_GT', 'A', 'C', 'S', 'BL', 'opt', 'Mot', 'LFP', '-v7.3');
+    save([file_name '_meta.mat'], 'A_GT', 'A', 'C', 'S', 'BL', 'opt', 'Mot', 'LFP', 'GT_motion_xy', '-v7.3');
 else
     file_name = [];
 end
@@ -113,9 +138,13 @@ addParameter(inp, 'd', [220, 300], valid_v)    % Dimensions of the simulated vid
 addParameter(inp, 'F', 1000, valid_v)          % Frame rate (frames per second) for the simulated calcium video data in each session
 addParameter(inp, 'overlap', 1, valid_v)       % Proportion of neurons remapping across multiple sessions
 addParameter(inp, 'overlapMulti', 0, valid_v)  % Remapping strenght. 0 means 100% remapping (should be the opposite, sorry!)
-addParameter(inp, 'motion', 0, valid_v)        % Inter-session missaligment amplitude (0 for none)
-addParameter(inp, 'motion_sz', 60, valid_v)    % Size (magnitude) of the motion effect applied to the frames
-addParameter(inp, 'translation', 1, valid_v)   % Add translation missaligment in addition to Non-rigid
+addParameter(inp, 'NR_misalignment', 0, valid_v)        % Inter-session non-rigid misalignment amplitude (0 for none)
+addParameter(inp, 'motion_sz', 60, valid_v)    % Size (magnitude) of the misalignment effect applied to the frames
+addParameter(inp, 'translation_misalignment', 1, valid_v)   % Add translation misalignment in addition to non-rigid component
+addParameter(inp, 'session_motion_std', 3, valid_v) % Within-session translational motion std (pixels)
+addParameter(inp, 'session_motion_phi', 0.99, valid_v) % Temporal smoothness for within-session motion (AR coefficient)
+addParameter(inp, 'session_motion_max', [], @(x) isnumeric(x) || isempty(x)) % Optional peak cap for within-session motion
+addParameter(inp, 'session_motion_seed', [], valid_v) % Seed offset for reproducible within-session motion
 addParameter(inp, 'ses', 2, valid_v)           % Number of sessions to be generated
 addParameter(inp, 'seed', 'shuffle')           % Random number generator seed ('shuffle' for a new seed each run)
 addParameter(inp, 'B', '1')                    % Baseline id (1-8). Different valeus used different baseline images
@@ -236,5 +265,31 @@ if opt.drift==1
 end
 end
 
+function [dx,dy] = make_xy_motion_ar(T, phi, std_px, max_px, seed)
+% AR(1) zero-mean x/y displacement (pixels)
+if nargin<2, phi=0.95; end                     % temporal smoothness (0..1)
+if nargin<3, std_px=2.0; end                   % target stationary std (px)
+if nargin<4, max_px=[]; end                    % optional peak cap
+if nargin<5, rng('default'); else, rng(seed); end
 
+sigma = std_px*sqrt(1-phi^2);                  % innovation std for AR(1)
+e1 = sigma*randn(1,T); e2 = sigma*randn(1,T);
+dx = filter(1,[1 -phi], e1);                   % x_t = phi*x_{t-1} + e_t
+dy = filter(1,[1 -phi], e2);
+dx = dx - mean(dx); dy = dy - mean(dy);        % center at 0
 
+if ~isempty(max_px)
+    s = max(1, max([abs(dx) abs(dy)],[],'all')/max_px);
+    dx = dx./s; dy = dy./s;
+end
+end
+
+function Yout = apply_xy_translation(Y, dx, dy)
+% Y: [Ly x Lx x T], dx/dy: pixels
+[~,~,T] = size(Y);
+Yout = zeros(size(Y),'like',Y);
+for k=1:T
+    Yout(:,:,k) = imtranslate(Y(:,:,k), [dx(k) dy(k)], 'linear', ...
+        'OutputView','same','FillValues',0);
+end
+end

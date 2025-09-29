@@ -7,8 +7,10 @@ This project provides a MATLAB function `Simulate_Ca_video` to simulate calcium 
 To get started, you can call the function with default or customized parameters:
 
 ```matlab
-[out, Mot, outpath, file_name, A] = Simulate_Ca_video('Nneu', 100, 'ses', 2, 'CA1_A', true, 'PNR', 1);
+[Mot, outpath, file_name, A, GT_motion_xy] = Simulate_Ca_video('Nneu', 100, 'ses', 2, 'CA1_A', true, 'PNR', 1);
 ```
+
+The final output `GT_motion_xy` stores per-session x/y displacements applied within each session and is also written to the metadata file when saving results.
 
 For detailed information on each parameter and sub-function, please refer to the [Function Documentation](#function-documentation) section.
 
@@ -22,7 +24,7 @@ For detailed information on each parameter and sub-function, please refer to the
 
 ### Description
 
-The `Simulate_Ca_video` function generates simulated calcium imaging videos with neural data, motion artifacts, and noise. It allows for customization of various parameters including the number of neurons, sessions, frame rate, and more.
+The `Simulate_Ca_video` function generates simulated calcium imaging videos with neural data, across-session misalignment artifacts, within-session motion, and noise. It allows for customization of various parameters including the number of neurons, sessions, frame rate, and more.
 
 ### Parameters
 
@@ -33,9 +35,13 @@ The `Simulate_Ca_video` function generates simulated calcium imaging videos with
 - **'d'**: Dimensions of the simulated video frames (width and height) in pixels.
 - **'F'**: Frame rate (frames per second) for the simulated calcium video data.
 - **'overlap'**: Proportion of neurons remapping across multiple sessions.
-- **'motion'**: Inter-session misalignment amplitude.
-- **'motion_sz'**: Size of the motion effect applied to the frames.
-- **'translation'**: Add translation misalignment in addition to Non-rigid motion.
+- **'NR_misalignment'**: Inter-session non-rigid misalignment amplitude.
+- **'motion_sz'**: Size of the misalignment effect applied to the frames.
+- **'translation_misalignment'**: Add translation misalignment in addition to the non-rigid component.
+- **'session_motion_std'**: Within-session translational motion standard deviation in pixels.
+- **'session_motion_phi'**: Temporal smoothness (AR coefficient) for within-session motion.
+- **'session_motion_max'**: Optional cap on peak within-session displacement (pixels).
+- **'session_motion_seed'**: Seed offset for reproducible within-session motion.
 - **'ses'**: Number of sessions to be generated.
 - **'seed'**: Random number generator seed.
 - **'B'**: Baseline id for different baseline images.
@@ -58,13 +64,13 @@ The `Simulate_Ca_video` function generates simulated calcium imaging videos with
 
 ```matlab
 % Example 1
-[out, Mot, outpath, file_name, A] = Simulate_Ca_video('Nneu', 100, 'ses', 2, 'CA1_A', true, 'PNR', 1);
+[Mot, outpath, file_name, A, GT_motion_xy] = Simulate_Ca_video('Nneu', 100, 'ses', 2, 'CA1_A', true, 'PNR', 1);
 
 % Example 2
-[out, Mot, outpath, file_name, A] = Simulate_Ca_video('Nneu', 50, 'ses', 1, 'F', 18000, 'LFP', 8, 'spike_prob', [-4.91, 0.83], 'sf', 60);
+[Mot, outpath, file_name, A, GT_motion_xy] = Simulate_Ca_video('Nneu', 50, 'ses', 1, 'F', 18000, 'LFP', 8, 'spike_prob', [-4.91, 0.83], 'sf', 60);
 
 % Example 3
-[out, Mot, outpath, file_name, A] = Simulate_Ca_video('Nneu', 300, 'ses', 20, 'F', 1500, 'motion', 0, 'min_dist', 2, 'spike_prob', [-2, 0.83], 'A2', true, 'overlap', 0.2);
+[Mot, outpath, file_name, A, GT_motion_xy] = Simulate_Ca_video('Nneu', 300, 'ses', 20, 'F', 1500, 'NR_misalignment', 0, 'min_dist', 2, 'spike_prob', [-2, 0.83], 'A2', true, 'overlap', 0.2);
 ```
 
 ### Detailed Function Workflow
@@ -73,10 +79,11 @@ The `Simulate_Ca_video` function generates simulated calcium imaging videos with
 2. **Create Baselines**: Generate baseline images using `create_baseline`.
 3. **Create Neural Data**: Generate neural data using `create_neuron_data`.
 4. **Apply Overlapping Mask**: Apply remapping and drifting effects to the data.
-5. **Add Non-Rigid Motion**: Introduce motion artifacts to the sessions using `Add_NRmotion`.
+5. **Add Non-Rigid Misalignment**: Introduce across-session misalignment artifacts to the sessions using `Add_NRmotion`.
 6. **Create Noise Data**: Generate and add noise to the simulated data.
-7. **Integrate Model**: Combine all components to form the final simulated video.
-8. **Save Results**: Save the output if the `save_files` flag is set.
+7. **Apply Within-Session Motion**: Use AR-driven translations to inject realistic frame-to-frame motion into each session.
+8. **Integrate Model**: Combine all components to form the final simulated video.
+9. **Save Results**: Save the output if the `save_files` flag is set (metadata now includes within-session motion ground truth).
 
 ## Sub-Functions
 
@@ -93,7 +100,7 @@ Generates baseline images for the simulation.
 Applies remapping and drifting effects to the neural data.
 
 ### Add_NRmotion
-Adds non-rigid motion artifacts to the sessions.
+Adds non-rigid misalignment artifacts across sessions.
 
 ### saveash5
 Saves data in HDF5 format.

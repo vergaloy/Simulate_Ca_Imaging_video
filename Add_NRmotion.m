@@ -1,4 +1,4 @@
-function [dM,dA,dbA,D]=Add_NRmotion(M,A,bA,magnitude,plotme,translation,msz)
+function [dM,dA,dbA,D]=Add_NRmotion(M,A,bA,magnitude,plotme,translation_misalignment,msz)
 %%
 if ~exist('magnitude','var')
     magnitude=2;
@@ -8,8 +8,8 @@ if ~exist('plotme','var')
     plotme=0;
 end
 
-if ~exist('translation','var')
-    translation=0;
+if ~exist('translation_misalignment','var')
+    translation_misalignment=0;
 end
 
 if ~exist('msz','var')
@@ -19,9 +19,9 @@ end
 [d1,d2]=size(M);
 img1=mat2gray(imgaussfilt(randn(d1,d2),msz,'FilterSize',2001,'Padding','circular'));
 [Gx,Gy] = imgradientxy(img1);
-if translation>0
+if translation_misalignment>0
     T=randn(1,2);
-    T=T*(translation/sqrt(sum(T.^2)));
+    T=T*(translation_misalignment/sqrt(sum(T.^2)));
     Gx=(mat2gray(Gx)-0.5)*2*magnitude+T(1);
     Gy=(mat2gray(Gy)-0.5)*2*magnitude+T(2);
 else
