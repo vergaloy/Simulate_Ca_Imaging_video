@@ -1,4 +1,4 @@
-function [Mot, outpath, file_name, A, GT_motion_xy] = Simulate_Ca_video(varargin)
+function [pth_out,outpath,Mot,file_name, A, GT_motion_xy] = Simulate_Ca_video(varargin)
 % Simulate_Ca_video generates synthetic calcium imaging videos with optional across-session misalignment, within-session motion, and remapping.
 % It simulates neural activity, misalignment artifacts, baseline variability, and saves session-wise videos and metadata.
 
@@ -83,9 +83,13 @@ for i = 1:opt.ses
         mc_tag='';
     end
     if opt.save_avi
-        save_as_avi(FV + 1, [file_name '_ses' sprintf('%02d', i-1) mc_tag '.avi']);
+        pth_out{i}=[file_name '_ses' sprintf('%02d', i-1) mc_tag '.avi'];
+        save_as_avi(FV + 1,pth_out{i} );
+        pth_out{i}=which([file_name '_ses' sprintf('%02d', i-1) mc_tag '.avi']);
     else
-        saveash5(FV + 1, [file_name '_ses' sprintf('%02d', i-1) mc_tag]);
+        pth_out{i}=[file_name '_ses' sprintf('%02d', i-1) mc_tag];
+        saveash5(FV + 1, pth_out{i});
+        pth_out{i}=which([file_name '_ses' sprintf('%02d', i-1) mc_tag]);
     end
 
     % --- Ground truth generation ---
