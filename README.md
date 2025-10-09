@@ -46,7 +46,9 @@ The `Simulate_Ca_video` function generates simulated calcium imaging videos with
 - **'seed'**: Random number generator seed.
 - **'B'**: Baseline id for different baseline images.
 - **'spike_prob'**: Probability distribution parameters for spike events.
-- **'save_files'**: Flag to save simulation results.
+- **'save_videos'**: Flag to save session videos (.avi/.h5).
+- **'save_mat'**: Flag to save the metadata `.mat` file.
+- **'save_GT'**: Flag to save the ground-truth video.
 - **'create_mask'**: Flag to create a mask during the simulation.
 - **'comb_fact'**: Combination factor used in the simulation process.
 - **'drift'**: Presence of drifting activities in the simulated data.
@@ -83,7 +85,7 @@ The `Simulate_Ca_video` function generates simulated calcium imaging videos with
 6. **Create Noise Data**: Generate and add noise to the simulated data.
 7. **Apply Within-Session Motion**: Use AR-driven translations to inject realistic frame-to-frame motion into each session.
 8. **Integrate Model**: Combine all components to form the final simulated video.
-9. **Save Results**: Save the output if the `save_files` flag is set (metadata now includes within-session motion ground truth).
+9. **Save Results**: Save the output according to `save_videos`, `save_mat`, and `save_GT` (metadata now includes within-session motion ground truth).
 
 ## Sub-Functions
 

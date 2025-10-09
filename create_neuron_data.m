@@ -50,15 +50,31 @@ end
 N=size(X,2);
 
 if size(A,4)>1
-ix = randperm(size(A,4),N);
-w=linspace(0,1,opt.ses);
-for i=1:length(w)
-    As(:,:,:,i)=squeeze(A(:,:,1,ix))*(1-w(i))+squeeze(A(:,:,2,ix))*(w(i));
-end
+    ix = randperm(size(A,4),N);
+    w=linspace(0,1,opt.ses);
+    for i=1:length(w)
+        As(:,:,:,i)=squeeze(A(:,:,1,ix))*(1-w(i))+squeeze(A(:,:,2,ix))*(w(i));
+    end
 else
-ix = datasample(1:size(A,3),N);
-As=repelem(A(:,:,ix),1,1,1,opt.ses);
+    ix = datasample(1:size(A,3),N);
+    As=repelem(A(:,:,ix),1,1,1,opt.ses);
 end
+
+if opt.scale>1
+    [d1, d2, s, c] = size(As);
+    temp = zeros(round(d1*opt.scale), round(d2*opt.scale), s, c, 'like', As);
+
+    for si = 1:s
+        for ci = 1:c
+            temp(:,:,si,ci) = imresize(As(:,:,si,ci), opt.scale, 'bicubic');
+        end
+    end
+    As=temp;
+    clear temp
+end
+
+
+
 for s=1:opt.ses
     Aout_t=[];
     bA_t=[];

@@ -5,7 +5,7 @@ function [pth_out,outpath,Mot,file_name, A, GT_motion_xy] = Simulate_Ca_video(va
 % Example usages:
 % Simulate_Ca_video('NR_misalignment',0,'Nneu',100,'ses',2,'CA1_A',true,'PNR',1);
 % Simulate_Ca_video('Nneu',300,'ses',20,'F',1500,...);
-% V = Simulate_Ca_video('save_files',false,raw_data{1,:});
+% V = Simulate_Ca_video('save_videos',false,raw_data{1,:});
 
 % Parse inputs and initialize options
 opt = int_var(varargin);
@@ -36,10 +36,16 @@ file_name = datestr(now, 'yymmdd_HHMMSS');  % timestamp-based base filename
 ix1 = 1; F = opt.F; ix2 = F;
 PNR = opt.PNR; mult = 0.8;
 
-if opt.save_files
+saveVideos = logical(opt.save_videos);
+saveMat = logical(opt.save_mat);
+saveGT = logical(opt.save_GT);
+
+if saveGT
     % Prepare memory-mapped file for writing GT frames incrementally
     matGT = matfile([file_name '_GT.mat'], 'Writable', true);
 end
+
+pth_out = cell(1, opt.ses);
 
 for i = 1:opt.ses
     % --- Generate simulated session data ---
@@ -82,14 +88,18 @@ for i = 1:opt.ses
     else
         mc_tag='';
     end
-    if opt.save_avi
-        pth_out{i}=[file_name '_ses' sprintf('%02d', i-1) mc_tag '.avi'];
-        save_as_avi(FV + 1,pth_out{i} );
-        pth_out{i}=which([file_name '_ses' sprintf('%02d', i-1) mc_tag '.avi']);
+    if saveVideos
+        if opt.save_avi
+            pth_out{i}=[file_name '_ses' sprintf('%02d', i-1) mc_tag '.avi'];
+            save_as_avi(FV + 1,pth_out{i} );
+            pth_out{i}=which([file_name '_ses' sprintf('%02d', i-1) mc_tag '.avi']);
+        else
+            pth_out{i}=[file_name '_ses' sprintf('%02d', i-1) mc_tag];
+            saveash5(FV + 1, pth_out{i});
+            pth_out{i}=which([file_name '_ses' sprintf('%02d', i-1) mc_tag]);
+        end
     else
-        pth_out{i}=[file_name '_ses' sprintf('%02d', i-1) mc_tag];
-        saveash5(FV + 1, pth_out{i});
-        pth_out{i}=which([file_name '_ses' sprintf('%02d', i-1) mc_tag]);
+        pth_out{i} = [];
     end
 
     % --- Ground truth generation ---
@@ -99,7 +109,7 @@ for i = 1:opt.ses
         reshape(reshape(tbA, d1*d2, []) * C(:, ix1:ix2), d1, d2, []));
 
     % Write GT session to disk incrementally
-    if opt.save_files
+    if saveGT
         if i == 1
             matGT.GT = zeros(d1, d2, F * opt.ses, 'uint8');  % preallocate on disk
         end
@@ -115,17 +125,21 @@ for i = 1:opt.ses
 end
 
 %% Final saving
-if opt.save_files
+if saveGT
     % Save full GT video
     if opt.save_avi
         save_as_avi(matGT.GT + 1, [file_name '_GT.avi']);
     else
         saveash5(matGT.GT + 1, [file_name '_GT']);
     end
+end
 
+if saveMat
     % Save simulation metadata (everything else)
     save([file_name '_meta.mat'], 'A_GT', 'A', 'C', 'S', 'BL', 'opt', 'Mot', 'LFP', 'GT_motion_xy', '-v7.3');
-else
+end
+
+if ~(saveVideos || saveMat || saveGT)
     file_name = [];
 end
 
@@ -134,6 +148,7 @@ function opt=int_var(varargin)
 %% INTIALIZE VARIABLES
 inp = inputParser;
 valid_v = @(x) isnumeric(x);
+valid_bool = @(x) islogical(x) || (isnumeric(x) && isscalar(x) && ismember(x,[0,1]));
 addParameter(inp, 'outpath', [])               % Output path where simulation results will be saved
 addParameter(inp, 'min_dist', 8, valid_v)      % Minimum distance between neurons in the simulated data
 addParameter(inp, 'Nneu', 50, valid_v)         % Number of neurons (or neural units) to be simulated
@@ -153,7 +168,7 @@ addParameter(inp, 'ses', 2, valid_v)           % Number of sessions to be genera
 addParameter(inp, 'seed', 'shuffle')           % Random number generator seed ('shuffle' for a new seed each run)
 addParameter(inp, 'B', '1')                    % Baseline id (1-8). Different valeus used different baseline images
 addParameter(inp, 'spike_prob', [-4.9, 2.25])  % Probability distribution parameters for spike events (log scale mean and std)
-addParameter(inp, 'save_files', true)          % Flag to save simulation results (true/false)
+addParameter(inp, 'save_videos', true, valid_bool)          % Flag to save session videos (true/false)
 addParameter(inp, 'create_mask', true)         % Flag to create a mask during the simulation (true/false)
 addParameter(inp, 'comb_fact', 0, valid_v)     % Combination factor used in the simulation process
 addParameter(inp, 'drift', 0, valid_v)         % Presence of drifting activities in the simulated data (0 or 1)
@@ -164,15 +179,26 @@ addParameter(inp, 'invtRise', [2.08, 0.29], valid_v)   % Parameters related to t
 addParameter(inp, 'invtDecay', [0.55, 0.44], valid_v) % Parameters related to the decaying phase of calcium signals (log scale)
 addParameter(inp, 'disappearBV', 0, valid_v)   % Erode BV
 addParameter(inp, 'CA1_A', false)              % Change neurons shapes across sessions. Utilize CA1 data
-addParameter(inp, 'A2', false)                  % Use CA1 neurons shapes instead of DG.
+addParameter(inp, 'A2', false)                 % Use CA1 neurons shapes instead of DG.
 addParameter(inp, 'force_active', 1)           % All nuerons should have at least one Calcium transient per session (unless remapping)
-addParameter(inp, 'save_avi', 1)           % Save as avi. otherwise save as .h5
+addParameter(inp, 'save_avi', 1)               % Save as avi. otherwise save as .h5
+addParameter(inp, 'scale', 1)                  % Resize the dimensions of A
+addParameter(inp, 'save_mat', 1, valid_bool)   % Whether to save metadata (.mat) files
+addParameter(inp, 'save_GT', 1, valid_bool)    % Whether to save GT video
 varargin=varargin{1, 1};
 
 inp.KeepUnmatched = true;
 parse(inp,varargin{:});
 opt=inp.Results;
 opt.B=str2num(string(opt.B));
+
+if isfield(inp.Unmatched,'save_files') && any(strcmpi(inp.UsingDefaults,'save_videos'))
+    opt.save_videos = logical(inp.Unmatched.save_files);
+end
+
+opt.save_videos = logical(opt.save_videos);
+opt.save_mat = logical(opt.save_mat);
+opt.save_GT = logical(opt.save_GT);
 
 
 s=rng(opt.seed,'twister');
@@ -189,7 +215,7 @@ s.Seed
 end
 
 function  outpath=get_out_path(opt)
-if opt.save_files
+if opt.save_videos || opt.save_mat || opt.save_GT
     if isempty(opt.outpath)
         outpath = uigetdir(pwd,'select output folder');
     else

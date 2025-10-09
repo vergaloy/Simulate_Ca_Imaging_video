@@ -23,12 +23,12 @@ C=[];
 LFP=[];
 S=[];
 for i=1:opt.ses
-    [s,lfp]=create_random_spike(N,opt.F,opt.sf,P,invtRise,invtDecay,opt.LFP,1,opt.force_active);
+    [s,lfp]=create_random_spike(N,opt.F,opt.sf,P,opt.LFP,1,opt.force_active);
     LFP=[LFP,lfp];
     S=[S,s];
 end
-
-out=conv_spikes(S,invtRise,invtDecay,F)
+S=fix_inactive(S);
+C=conv_spikes(S,invtRise,invtDecay,size(S,2));
 
 
 % C=C.*(1+randn(length(X),1).*0.2);
@@ -41,22 +41,39 @@ function [Aout,bA]=create_spatial(BW,opt)
 [y, x] = find(BW);
 [X,Y]=get_random_points(x,y,opt.min_dist,opt.Nneu,opt.plotme);
 if opt.CA1_A
-load('A_CA1.mat');
+    load('A_CA1.mat');
+elseif opt.A2
+    load('A2.mat');
 else
-load('A.mat');
+    load('A.mat');
 end
 N=size(X,2);
 
 if size(A,4)>1
-ix = randperm(size(A,4),N);
-w=linspace(0,1,opt.ses);
-for i=1:length(w)
-    As(:,:,:,i)=squeeze(A(:,:,1,ix))*(1-w(i))+squeeze(A(:,:,2,ix))*(w(i));
-end
+    ix = randperm(size(A,4),N);
+    w=linspace(0,1,opt.ses);
+    for i=1:length(w)
+        As(:,:,:,i)=squeeze(A(:,:,1,ix))*(1-w(i))+squeeze(A(:,:,2,ix))*(w(i));
+    end
 else
-ix = randperm(size(A,3),N);
-As=repelem(A(:,:,ix),1,1,1,opt.ses);
+    ix = datasample(1:size(A,3),N);
+    As=repelem(A(:,:,ix),1,1,1,opt.ses);
 end
+
+if opt.scale>1
+[d1, d2, s, c] = size(As);
+temp = zeros(round(d1*opt.scale), round(d2*opt.scale), s, c, 'like', As);
+
+for si = 1:s
+    for ci = 1:c
+        out(:,:,si,ci) = imresize(imgs(:,:,si,ci), opt.scale, 'bicubic');
+    end
+end
+
+end
+
+
+
 for s=1:opt.ses
     Aout_t=[];
     bA_t=[];
@@ -90,5 +107,17 @@ for i=1:size(S,1)
     c = conv(temp, g);
     out(i,:)=c(1,1:F);
 end
-out=bin_data(out,1,bin);
 end
+
+function S=fix_inactive(S)
+d=size(S,2);
+in=find(sum(S,2)==0);
+for i=1:size(in,1)
+    S(in(i),randi(d,1))=1;
+end
+end
+
+
+
+
+
