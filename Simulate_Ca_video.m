@@ -46,25 +46,10 @@ if saveGT
 end
 
 pth_out = cell(1, opt.ses);
+batch_sz = opt.batch_sz;
 
-for i = 1:opt.ses
-    % --- Generate simulated session data ---
-    V = v2uint8(reshape(reshape(A{i}, d1*d2, []) * C(:, ix1:ix2), d1, d2, []) + ...
-        reshape(reshape(bA{i}, d1*d2, []) * C(:, ix1:ix2), d1, d2, []));
-
-    % Add smoothed noise
-    N = rand(d1, d2, F, 'single');
-    N = imgaussfilt(N);
-    N = N - mean(N, 3);
-    N = v2uint8(N);
-
-    % Combine neural signal, noise, and baseline
-    FV = mult * BL(:, :, i) + ...
-        (1 - mult) * V * (1 / (1 / PNR + 1)) + ...
-        (1 - mult) * N * (1 - 1 / (1 / PNR + 1));
-    FV = v2uint8(FV);
-
-    % Apply within-session translational motion if requested
+for i = progress(1:opt.ses)
+    % Precompute within-session motion, if any
     if opt.session_motion_std > 0
         prev_rng = rng;
         if isempty(opt.session_motion_seed)
@@ -75,14 +60,14 @@ for i = 1:opt.ses
         [dx, dy] = make_xy_motion_ar(F, opt.session_motion_phi, opt.session_motion_std, ...
             opt.session_motion_max, seed_i);
         rng(prev_rng);
-        FV = apply_xy_translation(single(FV), dx, dy);
-        FV = v2uint8(FV);
         GT_motion_xy{i} = {dx, dy};
     else
+        dx = [];
+        dy = [];
         GT_motion_xy{i} = [];
     end
 
-    % --- Save session output video ---
+    % Session output setup
     if opt.session_motion_std==0
         mc_tag='_mc';
     else
@@ -91,29 +76,77 @@ for i = 1:opt.ses
     if saveVideos
         if opt.save_avi
             pth_out{i}=[file_name '_ses' sprintf('%02d', i-1) mc_tag '.avi'];
-            save_as_avi(FV + 1,pth_out{i} );
-            pth_out{i}=which([file_name '_ses' sprintf('%02d', i-1) mc_tag '.avi']);
+            v = VideoWriter(pth_out{i}, 'Uncompressed AVI');
+            v.FrameRate = 25;
+            open(v);
         else
             pth_out{i}=[file_name '_ses' sprintf('%02d', i-1) mc_tag];
-            saveash5(FV + 1, pth_out{i});
-            pth_out{i}=which([file_name '_ses' sprintf('%02d', i-1) mc_tag]);
         end
     else
         pth_out{i} = [];
     end
 
-    % --- Ground truth generation ---
-    tA = A_GT{i}(21:end-20, 21:end-20, :);     % crop edges
+    tA = A_GT{i}(21:end-20, 21:end-20, :);     % crop edges once per session
     tbA = bA_GT{i}(21:end-20, 21:end-20, :);
-    V_GT = v2uint8(reshape(reshape(tA, d1*d2, []) * C(:, ix1:ix2), d1, d2, []) + ...
-        reshape(reshape(tbA, d1*d2, []) * C(:, ix1:ix2), d1, d2, []));
+    session_frames = ix1:ix2;
 
-    % Write GT session to disk incrementally
-    if saveGT
-        if i == 1
-            matGT.GT = zeros(d1, d2, F * opt.ses, 'uint8');  % preallocate on disk
+    if saveGT && i == 1
+        matGT.GT = zeros(d1, d2, F * opt.ses, 'uint8');  % preallocate on disk
+    end
+
+    for start_idx = progress(1:batch_sz:F)
+        batch_frames = start_idx:min(start_idx + batch_sz - 1, F);
+        global_idx = session_frames(batch_frames);
+
+        % --- Generate simulated session data in batches ---
+        V_batch = v2uint8(reshape(reshape(A{i}, d1*d2, []) * C(:, global_idx), d1, d2, []) + ...
+            reshape(reshape(bA{i}, d1*d2, []) * C(:, global_idx), d1, d2, []));
+
+        % Add smoothed noise
+        N_batch = rand(d1, d2, numel(batch_frames), 'single');
+        N_batch = imgaussfilt(N_batch);
+        N_batch = N_batch - mean(N_batch, 3);
+        N_batch = v2uint8(N_batch);
+
+        % Combine neural signal, noise, and baseline
+        FV_batch = mult * BL(:, :, i) + ...
+            (1 - mult) * V_batch * (1 / (1 / PNR + 1)) + ...
+            (1 - mult) * N_batch * (1 - 1 / (1 / PNR + 1));
+        FV_batch = v2uint8(FV_batch);
+
+        % Apply within-session translational motion if requested
+        if opt.session_motion_std > 0
+            FV_batch = apply_xy_translation(single(FV_batch), dx(batch_frames), dy(batch_frames));
+            FV_batch = v2uint8(FV_batch);
         end
-        matGT.GT(:, :, ix1:ix2) = V_GT;  % memory-safe write
+
+        % --- Save session output video ---
+        if saveVideos
+            if opt.save_avi
+                for k = 1:size(FV_batch, 3)
+                    writeVideo(v, FV_batch(:, :, k) + 1);
+                end
+            else
+                saveash5(FV_batch + 1, pth_out{i});
+            end
+        end
+
+        % --- Ground truth generation ---
+        if saveGT
+            V_GT_batch = v2uint8(reshape(reshape(tA, d1*d2, []) * C(:, global_idx), d1, d2, []) + ...
+                reshape(reshape(tbA, d1*d2, []) * C(:, global_idx), d1, d2, []));
+            matGT.GT(:, :, global_idx) = V_GT_batch;  % memory-safe write
+        end
+
+        % Clean batch variables from memory
+        clear V_batch N_batch FV_batch V_GT_batch
+    end
+
+    if saveVideos && opt.save_avi
+        close(v);
+        pth_out{i}=which([file_name '_ses' sprintf('%02d', i-1) mc_tag '.avi']);
+    elseif saveVideos && ~opt.save_avi
+        pth_out{i}=which([file_name '_ses' sprintf('%02d', i-1) mc_tag]);
     end
 
     % Update frame index
@@ -121,7 +154,7 @@ for i = 1:opt.ses
     ix2 = ix2 + F;
 
     % Clean session variables from memory
-    clear V N FV V_GT tA tbA
+    clear tA tbA dx dy
 end
 
 %% Final saving
@@ -149,12 +182,14 @@ function opt=int_var(varargin)
 inp = inputParser;
 valid_v = @(x) isnumeric(x);
 valid_bool = @(x) islogical(x) || (isnumeric(x) && isscalar(x) && ismember(x,[0,1]));
+valid_batch = @(x) isempty(x) || (isnumeric(x) && isscalar(x) && x > 0);
 addParameter(inp, 'outpath', [])               % Output path where simulation results will be saved
 addParameter(inp, 'min_dist', 8, valid_v)      % Minimum distance between neurons in the simulated data
 addParameter(inp, 'Nneu', 50, valid_v)         % Number of neurons (or neural units) to be simulated
 addParameter(inp, 'PNR', 2, valid_v)          % Peak-to-Noise Ratio (signal-to-noise ratio) for the simulated data
 addParameter(inp, 'd', [220, 300], valid_v)    % Dimensions of the simulated video frames (width and height) in pixels
 addParameter(inp, 'F', 1000, valid_v)          % Frame rate (frames per second) for the simulated calcium video data in each session
+addParameter(inp, 'batch_sz', [], valid_batch) % Frames per batch (defaults to F)
 addParameter(inp, 'overlap', 1, valid_v)       % Proportion of neurons remapping across multiple sessions
 addParameter(inp, 'overlapMulti', 0, valid_v)  % Remapping strenght. 0 means 100% remapping (should be the opposite, sorry!)
 addParameter(inp, 'NR_misalignment', 0, valid_v)        % Inter-session non-rigid misalignment amplitude (0 for none)
@@ -199,6 +234,10 @@ end
 opt.save_videos = logical(opt.save_videos);
 opt.save_mat = logical(opt.save_mat);
 opt.save_GT = logical(opt.save_GT);
+if isempty(opt.batch_sz)
+    opt.batch_sz = opt.F;
+end
+opt.batch_sz = max(1, min(opt.F, round(opt.batch_sz)));
 
 
 s=rng(opt.seed,'twister');
