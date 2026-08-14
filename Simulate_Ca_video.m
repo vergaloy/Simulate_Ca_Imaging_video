@@ -13,10 +13,16 @@ outpath = get_out_path(opt);  % choose output folder if saving enabled
 
 %% Generate synthetic data
 bl = create_baseline(opt);  % create session-specific background baselines
-[A_GT, bA_GT, C, S, LFP] = create_neuron_data(opt);  % simulate neurons and temporal traces
+[A_GT, bA_GT, C, S, LFP, placement] = create_neuron_data(opt);  % simulate neurons and temporal traces
 opt.Nneu2 = size(A_GT{1,1}, 3);  % store number of neurons
 
 C = add_remapping_drifting(C, opt);  % apply remapping or activity drift if needed
+
+% Measure the coherence that was actually achieved on the calcium traces. The
+% requested region_corr is a LATENT correlation of the spike generator; binary
+% thresholding lowers it and the calcium kernel raises it again, so the trace
+% correlation has to be measured and stored, never assumed.
+region_info = collect_region_info(opt, placement, C);
 
 % Apply synthetic non-rigid misalignment to neuron components for each session
 [BL(:,:,1), A{1,1}, bA{1,1}, Mot{1}] = Add_NRmotion(bl(:,:,1), A_GT{1}, bA_GT{1}, ...
@@ -28,6 +34,15 @@ end
 BL = v2uint8(BL);  % convert baseline to uint8
 
 [d1, d2] = size(BL(:,:,1));  % get spatial dimensions
+
+% Crop the ground-truth footprints to the field of view that is actually
+% written to disk. Add_NRmotion discards 20 px on every border of the warped
+% data, so an uncropped A_GT/bA_GT would not share a coordinate frame with the
+% session videos, the GT video, or the misaligned footprints in A/bA.
+for i = 1:opt.ses
+    A_GT{i}  = A_GT{i}(21:end-20, 21:end-20, :);
+    bA_GT{i} = bA_GT{i}(21:end-20, 21:end-20, :);
+end
 
 GT_motion_xy = cell(1, opt.ses);  % store within-session motion ground truth
 
@@ -86,8 +101,10 @@ for i = progress(1:opt.ses)
         pth_out{i} = [];
     end
 
-    tA = A_GT{i}(21:end-20, 21:end-20, :);     % crop edges once per session
-    tbA = bA_GT{i}(21:end-20, 21:end-20, :);
+    % Already cropped to the saved field of view, once for every session,
+    % where A_GT is built. Cropping here as well would do it F/batch_sz times.
+    tA = A_GT{i};
+    tbA = bA_GT{i};
     session_frames = ix1:ix2;
 
     if saveGT && i == 1
@@ -169,7 +186,7 @@ end
 
 if saveMat
     % Save simulation metadata (everything else)
-    save([file_name '_meta.mat'], 'A_GT', 'A', 'C', 'S', 'BL', 'opt', 'Mot', 'LFP', 'GT_motion_xy', '-v7.3');
+    save([file_name '_meta.mat'], 'A_GT', 'A', 'C', 'S', 'BL', 'opt', 'Mot', 'LFP', 'GT_motion_xy', 'placement', 'region_info', '-v7.3');
 end
 
 if ~(saveVideos || saveMat || saveGT)
@@ -177,6 +194,71 @@ if ~(saveVideos || saveMat || saveGT)
 end
 
 end
+function region_info = collect_region_info(opt, placement, C)
+% Everything the coherence analysis needs, gathered in one place: which region
+% each neuron belongs to, the region masks, the coherence that was requested,
+% and the coherence that was actually achieved on the calcium traces.
+%
+% Returns [] when the region layout was not used, so that a run without
+% region_areas is unaffected.
+
+region_info = [];
+if ~isfield(opt,'region_areas') || isempty(opt.region_areas)
+    return
+end
+
+region_info = struct();
+region_info.region_id           = placement.region_id(:)';   % 1..R per neuron
+region_info.region_masks_saved  = placement.region_masks_saved;
+region_info.region_id_image_saved = placement.region_id_image_saved;
+region_info.region_crop         = placement.region_crop;     % saved row r = full row r+crop
+region_info.corr_strength       = placement.corr_strength(:)'; % per neuron
+region_info.region_corr         = placement.region_corr;     % per region
+region_info.corr_length         = placement.corr_length;     % in gSig units
+region_info.gSig_fullres        = placement.gSig_fullres;    % pixels
+region_info.corr_length_px      = placement.corr_length * placement.gSig_fullres;
+region_info.region_areas_requested = placement.region_areas_requested;
+region_info.region_areas_saved     = placement.region_areas_saved;
+region_info.region_areas_allowed   = placement.region_areas_allowed;
+region_info.n_per_region        = placement.n_per_region;
+region_info.min_dist_per_region = placement.min_dist_per_region;
+
+% Neuron centres in the saved frame, and the pairwise distances the law is
+% fitted against.
+X = placement.X_saved(:);
+Y = placement.Y_saved(:);
+region_info.X_saved = X';
+region_info.Y_saved = Y';
+region_info.pair_distance = hypot(X - X.', Y - Y.');
+
+% ACHIEVED pairwise calcium trace correlation. This is what the coherence law
+% is fitted on. It is NOT the spike correlation and it is NOT region_corr.
+region_info.trace_corr = pair_corr(C);
+
+% Per session as well, since remapping can silence a neuron in some sessions.
+F = opt.F;
+region_info.trace_corr_per_session = cell(1, opt.ses);
+for i = 1:opt.ses
+    region_info.trace_corr_per_session{i} = pair_corr(C(:, (i-1)*F+1:i*F));
+end
+end
+
+function Rc = pair_corr(C)
+% Pearson correlation between every pair of rows, with constant rows (a neuron
+% silenced by remapping) reported as NaN rather than 0.
+C = double(C);
+Cc = C - mean(C, 2);
+sd = sqrt(sum(Cc.^2, 2));
+bad = sd <= 0;
+sd(bad) = 1;
+Cn = Cc ./ sd;
+Rc = Cn * Cn.';
+Rc(bad, :) = NaN;
+Rc(:, bad) = NaN;
+Rc(1:size(Rc,1)+1:end) = 1;
+Rc(bad, bad) = NaN;
+end
+
 function opt=int_var(varargin)
 %% INTIALIZE VARIABLES
 inp = inputParser;
@@ -185,6 +267,60 @@ valid_bool = @(x) islogical(x) || (isnumeric(x) && isscalar(x) && ismember(x,[0,
 valid_batch = @(x) isempty(x) || (isnumeric(x) && isscalar(x) && x > 0);
 addParameter(inp, 'outpath', [])               % Output path where simulation results will be saved
 addParameter(inp, 'min_dist', 8, valid_v)      % Minimum distance between neurons in the simulated data
+% --- spatially heterogeneous neuron density (optional, off by default) ---
+% dense_region: M x 4 matrix, one [r1 r2 c1 c2] rectangle per row, inclusive
+%   pixel indices. By default the rectangle is read in SAVED-VIDEO coordinates,
+%   i.e. the frame actually written to disk, which is 40 px smaller than 'd' on
+%   each axis because Add_NRmotion crops 20 px per border. Leave [] (default)
+%   for the original homogeneous placement.
+% dense_frac: fraction of Nneu placed inside the rectangles. A scalar is the
+%   TOTAL dense fraction and is split evenly between the rectangles; a vector
+%   gives the fraction of each rectangle. The remainder goes to the background.
+% dense_min_dist: minimum neuron separation inside the rectangles (scalar or one
+%   per rectangle). [] means "same as min_dist", i.e. no density contrast.
+%   Outside the rectangles min_dist is used, as before.
+% dense_region_frame: 'saved' (default) or 'full', the coordinate frame the
+%   rectangles are expressed in.
+addParameter(inp, 'dense_region', [], @(x) isempty(x) || (isnumeric(x) && size(x,2)==4))
+addParameter(inp, 'dense_frac', 0.5, valid_v)
+addParameter(inp, 'dense_min_dist', [], @(x) isempty(x) || isnumeric(x))
+addParameter(inp, 'dense_region_frame', 'saved', @(x) ischar(x) || isstring(x))
+% placement_margin: forbid neuron centres within this many pixels of the
+%   FULL-frame ('d') border. [] (default) keeps the original behaviour. Only
+%   useful with create_mask=false, where neurons would otherwise be placed in
+%   the 20 px strip that Add_NRmotion crops away, leaving empty ground-truth
+%   footprints. 45 px (20 crop + half of the 50 px neuron kernel) is a safe value.
+addParameter(inp, 'placement_margin', [], @(x) isempty(x) || (isnumeric(x) && isscalar(x)))
+% --- random continuous regions with per-region density and activity
+%     coherence (optional, off by default) --------------------------------
+% region_areas: 1xR target region areas, in SAVED-FRAME pixels, i.e. on the
+%   frame actually written to disk, which is 'd' minus 40 on each axis because
+%   Add_NRmotion crops 20 px per border. Same coordinate convention as the
+%   'saved' setting of dense_region_frame. Because the regions must jointly
+%   cover the frame, only the RATIOS between the entries can be honoured and
+%   grow_random_regions rescales them to sum to the saved-frame area. Leave []
+%   (default) for the original homogeneous placement and independent spikes.
+% region_n: 1xR number of neurons per region. [] splits Nneu in proportion to
+%   the area available in each region.
+% region_min_dist: 1xR minimum neuron separation per region, in pixels.
+%   [] uses min_dist everywhere.
+% region_corr: 1xR zero-distance activity correlation of each region, in
+%   [0, 1). Every neuron inherits the value of the region it was placed in and
+%   the spike trains come from correlated_spikes instead of the independent
+%   draw in create_random_spike. [] means zero, i.e. no coherence.
+% corr_length: correlation decay length, in gSig units. The pairwise latent
+%   correlation is region_corr * exp(-distance / (corr_length * gSig)), with
+%   gSig measured from the neuron footprints actually drawn (about 2.6 px at
+%   scale 1).
+% region_seed: seed for the region layout only. [] falls back to 'seed'. The
+%   layout draw restores the global random state, so it never changes the rest
+%   of the simulation.
+addParameter(inp, 'region_areas', [], @(x) isempty(x) || (isnumeric(x) && isvector(x)))
+addParameter(inp, 'region_n', [], @(x) isempty(x) || isnumeric(x))
+addParameter(inp, 'region_min_dist', [], @(x) isempty(x) || isnumeric(x))
+addParameter(inp, 'region_corr', [], @(x) isempty(x) || isnumeric(x))
+addParameter(inp, 'corr_length', 3, @(x) isnumeric(x) && isscalar(x) && x > 0)
+addParameter(inp, 'region_seed', [], @(x) isempty(x) || (isnumeric(x) && isscalar(x)))
 addParameter(inp, 'Nneu', 50, valid_v)         % Number of neurons (or neural units) to be simulated
 addParameter(inp, 'PNR', 2, valid_v)          % Peak-to-Noise Ratio (signal-to-noise ratio) for the simulated data
 addParameter(inp, 'd', [220, 300], valid_v)    % Dimensions of the simulated video frames (width and height) in pixels
