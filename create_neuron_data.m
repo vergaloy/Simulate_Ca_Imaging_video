@@ -36,7 +36,7 @@ if has_region_layout(opt)
     cs = placement.corr_strength(:);
     for i=1:opt.ses
         s = correlated_spikes(placement.X, placement.Y, P, opt.F, cs, ...
-            opt.corr_length, placement.gSig_fullres);
+            opt.corr_length, placement.gSig_fullres, opt.burst_tau);
         if opt.force_active==1
             s = force_active_rows(s);
         end
@@ -100,8 +100,15 @@ else
 end
 
 if opt.scale>1
-    [d1, d2, s, c] = size(As);
-    temp = zeros(round(d1*opt.scale), round(d2*opt.scale), s, c, 'like', As);
+    [~, ~, s, c] = size(As);
+    % Allocate from the size imresize ACTUALLY returns rather than predicting it
+    % with round(). imresize sizes its output with ceil(), so for scales where
+    % size*scale lands on a floating-point boundary the two disagree by one
+    % pixel: 50*2.2 evaluates to 110.00000000000001, giving round 110 against
+    % imresize's 111, and the assignment below then fails. Probing once is exact
+    % for every scale and costs one extra resize.
+    probe = imresize(As(:,:,1,1), opt.scale, 'bicubic');
+    temp = zeros(size(probe,1), size(probe,2), s, c, 'like', As);
 
     for si = 1:s
         for ci = 1:c
@@ -220,8 +227,70 @@ else
 end
 % grow_random_regions restores the global random state on exit, so the layout
 % seed does not disturb the rest of the simulation.
-[masks_saved, region_id_image, areas_saved] = ...
-    grow_random_regions(s1, s2, areas, layout_seed);
+%
+% Two layouts are available. 'grown' (default) grows R irregular regions to the
+% requested areas from random seeds. 'quadrants' instead places a centred SQUARE
+% window and splits it into a 2x2 grid, so spatial density and temporal
+% correlation can be crossed as a balanced factorial: the grown layout confounds
+% them, because region area and region shape both vary, and the low-density /
+% high-correlation cell never materialises. With 'quadrants' the four areas are
+% equal by construction and opt.region_areas is ignored except for its length.
+layout = 'grown';
+if isfield(opt,'region_layout') && ~isempty(opt.region_layout)
+    layout = lower(char(opt.region_layout));
+end
+switch layout
+    case 'grown'
+        [masks_saved, region_id_image, areas_saved] = ...
+            grow_random_regions(s1, s2, areas, layout_seed);
+    case 'quadrants'
+        if R ~= 4
+            error('create_neuron_data:quadrantCount', ...
+                'region_layout ''quadrants'' needs exactly 4 regions, got %d.', R);
+        end
+        margin = 20;
+        if isfield(opt,'placement_margin') && ~isempty(opt.placement_margin)
+            margin = opt.placement_margin;
+        end
+        side = [];
+        if isfield(opt,'window_side') && ~isempty(opt.window_side)
+            side = opt.window_side;
+        end
+        [masks_saved, region_id_image, qinfo] = ...
+            quadrant_regions(s1, s2, margin, side);
+        areas_saved = cellfun(@(m) sum(m(:)), masks_saved);
+        fprintf(['quadrant window: side %d px, occupancy %.1f%% of the saved frame, ' ...
+                 'quadrant area %d px\n'], qinfo.side, 100*qinfo.occupancy, qinfo.quad_area);
+    case 'grid'
+        % An nr x nc grid, so density and correlation can be varied over a
+        % range instead of at two levels each. Two levels are enough to show a
+        % factor matters, but not to fit a rule as a function of it.
+        if R < 4
+            error('create_neuron_data:gridCount', ...
+                'region_layout ''grid'' needs at least 4 regions, got %d.', R);
+        end
+        nrc = round(sqrt(R));
+        if nrc*nrc ~= R
+            error('create_neuron_data:gridSquare', ...
+                'region_layout ''grid'' needs a square number of regions, got %d.', R);
+        end
+        margin = 20;
+        if isfield(opt,'placement_margin') && ~isempty(opt.placement_margin)
+            margin = opt.placement_margin;
+        end
+        side = [];
+        if isfield(opt,'window_side') && ~isempty(opt.window_side)
+            side = opt.window_side;
+        end
+        [masks_saved, region_id_image, ginfo] = ...
+            grid_regions(s1, s2, margin, nrc, nrc, side);
+        areas_saved = cellfun(@(m) sum(m(:)), masks_saved);
+        fprintf('grid window: %dx%d cells of %d px, cell area %d px\n', ...
+                ginfo.nr, ginfo.nc, ginfo.step, ginfo.cell_area);
+    otherwise
+        error('create_neuron_data:layout', ...
+            'region_layout must be ''grown'', ''quadrants'' or ''grid'', got ''%s''.', layout);
+end
 
 % Lift the masks into the full frame and intersect with the (heart) mask.
 region_masks = cell(1, R);

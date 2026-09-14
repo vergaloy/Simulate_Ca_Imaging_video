@@ -1,4 +1,4 @@
-function S = correlated_spikes(X, Y, P, F, corr_strength, corr_length_gSig, gSig_fullres)
+function S = correlated_spikes(X, Y, P, F, corr_strength, corr_length_gSig, gSig_fullres, burst_tau)
 % CORRELATED_SPIKES Distance-dependent correlated Bernoulli spike trains.
 %
 %   S = correlated_spikes(X, Y, P, F, corr_strength, corr_length_gSig, gSig_fullres)
@@ -24,6 +24,22 @@ function S = correlated_spikes(X, Y, P, F, corr_strength, corr_length_gSig, gSig
 %                       by multiplying with gSig_fullres.
 %     gSig_fullres      Neuron radius parameter in FULL-RESOLUTION pixels.
 %                       Used only to convert corr_length_gSig into pixels.
+%     burst_tau         Optional, default 0. Width in FRAMES of a Gaussian
+%                       kernel applied along time to the latent field before
+%                       thresholding. Zero reproduces the previous behaviour
+%                       exactly.
+%
+%                       WHY IT MATTERS. Thresholding a Gaussian into isolated
+%                       spikes destroys most of the latent correlation, which
+%                       caps the achievable CALCIUM TRACE correlation near 0.12
+%                       even at corr_strength 0.8. Smoothing the latent first
+%                       makes threshold crossings CLUSTER, so the trace is
+%                       dominated by a few large shared transients instead of
+%                       many isolated spikes, and far more of the correlation
+%                       survives. The smoothing is applied identically to every
+%                       row, so corr(Z_i, Z_j) is preserved EXACTLY and the
+%                       spatial structure is untouched; only the temporal
+%                       character of the spiking changes.
 %
 %   OUTPUT
 %     S                 N-by-F matrix of 0/1 doubles. Same shape and dtype as
@@ -103,6 +119,12 @@ end
 if ~isscalar(gSig_fullres) || gSig_fullres <= 0
     error('correlated_spikes:gSig', 'gSig_fullres must be a positive scalar.');
 end
+if nargin < 8 || isempty(burst_tau)
+    burst_tau = 0;                      % default off: bit-for-bit as before
+end
+if ~isscalar(burst_tau) || burst_tau < 0
+    error('correlated_spikes:burst', 'burst_tau must be a non-negative scalar.');
+end
 
 cs = expand_param(corr_strength, N, 'corr_strength');
 cl = expand_param(corr_length_gSig, N, 'corr_length_gSig');
@@ -138,6 +160,19 @@ else
     Sigma = build_sigma(X, Y, cs, cl, gSig_fullres);
     L = safe_chol(Sigma);          % lower-triangular factor, Sigma = L*L'
     Z = L * randn(N, F);
+end
+
+%% ----- burstiness: smooth the latent along TIME -----------------------
+% Applied identically to every row, so the between-row correlation is
+% unchanged; only the within-row temporal structure becomes clustered.
+% Rows are re-standardised afterwards, but note the empirical-quantile
+% threshold below makes the marginal rates exact regardless.
+if burst_tau > 0
+    h = ceil(3 * burst_tau);
+    w = exp(-((-h:h).^2) / (2 * burst_tau^2));
+    w = w / sqrt(sum(w.^2));            % keep unit variance
+    Z = conv2(Z, w, 'same');
+    Z = (Z - mean(Z, 2)) ./ (std(Z, 0, 2) + eps);
 end
 
 %% ----- threshold each row at its own empirical quantile ---------------

@@ -320,6 +320,23 @@ addParameter(inp, 'region_n', [], @(x) isempty(x) || isnumeric(x))
 addParameter(inp, 'region_min_dist', [], @(x) isempty(x) || isnumeric(x))
 addParameter(inp, 'region_corr', [], @(x) isempty(x) || isnumeric(x))
 addParameter(inp, 'corr_length', 3, @(x) isnumeric(x) && isscalar(x) && x > 0)
+% burst_tau: width in FRAMES of a Gaussian kernel applied along time to the
+%   latent field before it is thresholded into spikes. 0 (default) reproduces
+%   the previous behaviour exactly. Larger values make spikes CLUSTER into
+%   bursts, which is what lets the achieved CALCIUM TRACE correlation reach
+%   useful values: thresholding a Gaussian into isolated spikes destroys most
+%   of the latent correlation and caps the trace correlation near 0.12 even at
+%   corr_strength 0.8. The smoothing is identical for every neuron, so the
+%   spatial correlation structure is preserved exactly.
+addParameter(inp, 'burst_tau', 0, @(x) isnumeric(x) && isscalar(x) && x >= 0)
+% region_layout: 'grown' (default, irregular regions grown to region_areas) or
+%   'quadrants' (a centred square window split 2x2, equal areas). Use
+%   'quadrants' when density and correlation must be CROSSED: the grown layout
+%   varies area and shape alongside them, which confounds the two factors.
+% window_side: optional side of that square in pixels; defaults to the largest
+%   square fitting inside placement_margin.
+addParameter(inp, 'region_layout', 'grown', @(x) ischar(x) || isstring(x))
+addParameter(inp, 'window_side', [], @(x) isempty(x) || (isnumeric(x) && isscalar(x)))
 addParameter(inp, 'region_seed', [], @(x) isempty(x) || (isnumeric(x) && isscalar(x)))
 addParameter(inp, 'Nneu', 50, valid_v)         % Number of neurons (or neural units) to be simulated
 addParameter(inp, 'PNR', 2, valid_v)          % Peak-to-Noise Ratio (signal-to-noise ratio) for the simulated data
