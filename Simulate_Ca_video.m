@@ -1,4 +1,4 @@
-function [pth_out,outpath,Mot,file_name, A, GT_motion_xy] = Simulate_Ca_video(varargin)
+function [pth_out,outpath,Mot,file_name, A, GT_motion_xy, GT_nonrigid] = Simulate_Ca_video(varargin)
 % Simulate_Ca_video generates synthetic calcium imaging videos with optional across-session misalignment, within-session motion, and remapping.
 % It simulates neural activity, misalignment artifacts, baseline variability, and saves session-wise videos and metadata.
 
@@ -45,6 +45,9 @@ for i = 1:opt.ses
 end
 
 GT_motion_xy = cell(1, opt.ses);  % store within-session motion ground truth
+% Within-session non-rigid ground truth: the control points and their
+% trajectories, which is everything needed to rebuild the field that was applied.
+GT_nonrigid  = cell(1, opt.ses);
 
 %% Simulate each session one-by-one (memory-efficient)
 file_name = datestr(now, 'yymmdd_HHMMSS');  % timestamp-based base filename
@@ -63,16 +66,44 @@ end
 pth_out = cell(1, opt.ses);
 batch_sz = opt.batch_sz;
 
+% Within-session motion amplitude, per session. A scalar applies to all of them,
+% which is what this used to be; a vector gives each session its own. Sessions
+% recorded on different days do not shake by the same amount, and a pipeline that
+% corrects each session on its own then crops each to its own valid region, so
+% equal amplitudes produce sessions that differ in size by a pixel or two and
+% never exercise the case where they differ properly.
+motion_std = opt.session_motion_std(:)';
+if isscalar(motion_std)
+    motion_std = repmat(motion_std, 1, opt.ses);
+elseif numel(motion_std) ~= opt.ses
+    error('Simulate_Ca_video:motionStd', ...
+        ['session_motion_std must be a scalar or one value per session. ' ...
+         'Got %d values for %d sessions.'], numel(motion_std), opt.ses);
+end
+
+% Within-session NON-RIGID amplitude, same rules. Translation moves the whole
+% frame; this bends it, so a piecewise-rigid corrector has something real to
+% find. Zero, the default, leaves the motion purely rigid as before.
+nr_std = opt.session_nonrigid_std(:)';
+if isscalar(nr_std)
+    nr_std = repmat(nr_std, 1, opt.ses);
+elseif numel(nr_std) ~= opt.ses
+    error('Simulate_Ca_video:nonrigidStd', ...
+        ['session_nonrigid_std must be a scalar or one value per session. ' ...
+         'Got %d values for %d sessions.'], numel(nr_std), opt.ses);
+end
+
 for i = progress(1:opt.ses)
+    std_i = motion_std(i);
     % Precompute within-session motion, if any
-    if opt.session_motion_std > 0
+    if std_i > 0
         prev_rng = rng;
         if isempty(opt.session_motion_seed)
             seed_i = opt.seed + i;
         else
             seed_i = opt.session_motion_seed + i - 1;
         end
-        [dx, dy] = make_xy_motion_ar(F, opt.session_motion_phi, opt.session_motion_std, ...
+        [dx, dy] = make_xy_motion_ar(F, opt.session_motion_phi, std_i, ...
             opt.session_motion_max, seed_i);
         rng(prev_rng);
         GT_motion_xy{i} = {dx, dy};
@@ -82,8 +113,29 @@ for i = progress(1:opt.ses)
         GT_motion_xy{i} = [];
     end
 
+    % Precompute within-session non-rigid motion, if any. The spline basis
+    % depends only on where the control points sit, so it is built once per
+    % session and reused for every frame.
+    nr_i = nr_std(i);
+    if nr_i > 0
+        prev_rng = rng;
+        if isempty(opt.session_motion_seed)
+            nr_seed = opt.seed + 1000 + i;
+        else
+            nr_seed = opt.session_motion_seed + 1000 + i - 1;
+        end
+        [ctrl_xy, cdx, cdy] = make_nonrigid_motion_ar([d1, d2], F, ...
+            opt.nonrigid_grid, opt.session_motion_phi, nr_i, opt.session_motion_max, nr_seed);
+        nr_basis = tps_dense_basis(ctrl_xy, [d1, d2]);
+        rng(prev_rng);
+        GT_nonrigid{i} = {ctrl_xy, cdx, cdy};
+    else
+        cdx = []; cdy = []; nr_basis = [];
+        GT_nonrigid{i} = [];
+    end
+
     % Session output setup
-    if opt.session_motion_std==0
+    if std_i==0 && nr_i==0
         mc_tag='_mc';
     else
         mc_tag='';
@@ -132,8 +184,17 @@ for i = progress(1:opt.ses)
         FV_batch = v2uint8(FV_batch);
 
         % Apply within-session translational motion if requested
-        if opt.session_motion_std > 0
+        if std_i > 0
             FV_batch = apply_xy_translation(single(FV_batch), dx(batch_frames), dy(batch_frames));
+            FV_batch = v2uint8(FV_batch);
+        end
+
+        % Then bend it. Translation first, deformation second, which is the order
+        % a correction pipeline undoes them in: a whole-frame shift, then what is
+        % left over.
+        if nr_i > 0
+            FV_batch = apply_nonrigid_motion(single(FV_batch), nr_basis, ...
+                cdx(:, batch_frames), cdy(:, batch_frames));
             FV_batch = v2uint8(FV_batch);
         end
 
@@ -186,7 +247,7 @@ end
 
 if saveMat
     % Save simulation metadata (everything else)
-    save([file_name '_meta.mat'], 'A_GT', 'A', 'C', 'S', 'BL', 'opt', 'Mot', 'LFP', 'GT_motion_xy', 'placement', 'region_info', '-v7.3');
+    save([file_name '_meta.mat'], 'A_GT', 'A', 'C', 'S', 'BL', 'opt', 'Mot', 'LFP', 'GT_motion_xy', 'GT_nonrigid', 'placement', 'region_info', '-v7.3');
 end
 
 if ~(saveVideos || saveMat || saveGT)
@@ -348,10 +409,12 @@ addParameter(inp, 'overlapMulti', 0, valid_v)  % Remapping strenght. 0 means 100
 addParameter(inp, 'NR_misalignment', 0, valid_v)        % Inter-session non-rigid misalignment amplitude (0 for none)
 addParameter(inp, 'motion_sz', 60, valid_v)    % Size (magnitude) of the misalignment effect applied to the frames
 addParameter(inp, 'translation_misalignment', 1, valid_v)   % Add translation misalignment in addition to non-rigid component
-addParameter(inp, 'session_motion_std', 3, valid_v) % Within-session translational motion std (pixels)
+addParameter(inp, 'session_motion_std', 3, valid_v) % Within-session translational motion std (pixels). Scalar, or one value per session.
 addParameter(inp, 'session_motion_phi', 0.99, valid_v) % Temporal smoothness for within-session motion (AR coefficient)
 addParameter(inp, 'session_motion_max', [], @(x) isnumeric(x) || isempty(x)) % Optional peak cap for within-session motion
 addParameter(inp, 'session_motion_seed', [], valid_v) % Seed offset for reproducible within-session motion
+addParameter(inp, 'session_nonrigid_std', 0, valid_v)   % Within-session NON-RIGID amplitude (pixels). Scalar, or one value per session. 0 = purely rigid motion.
+addParameter(inp, 'nonrigid_grid', 3, valid_v)          % Control points per axis for the non-rigid field. 3 gives a 3x3 grid.
 addParameter(inp, 'ses', 2, valid_v)           % Number of sessions to be generated
 addParameter(inp, 'seed', 'shuffle')           % Random number generator seed ('shuffle' for a new seed each run)
 addParameter(inp, 'B', '1')                    % Baseline id (1-8). Different valeus used different baseline images
