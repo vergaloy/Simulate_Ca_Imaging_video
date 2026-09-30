@@ -75,12 +75,12 @@ for i = progress(1:opt.ses)
     end
     if saveVideos
         if opt.save_avi
-            pth_out{i}=[file_name '_ses' sprintf('%02d', i-1) mc_tag '.avi'];
+            pth_out{i}=[file_name '_ses' sprintf('%02d', i) mc_tag '.avi'];
             v = VideoWriter(pth_out{i}, 'Uncompressed AVI');
             v.FrameRate = 25;
             open(v);
         else
-            pth_out{i}=[file_name '_ses' sprintf('%02d', i-1) mc_tag];
+            pth_out{i}=[file_name '_ses' sprintf('%02d', i) mc_tag];
         end
     else
         pth_out{i} = [];
@@ -144,9 +144,9 @@ for i = progress(1:opt.ses)
 
     if saveVideos && opt.save_avi
         close(v);
-        pth_out{i}=which([file_name '_ses' sprintf('%02d', i-1) mc_tag '.avi']);
+        pth_out{i}=which([file_name '_ses' sprintf('%02d', i) mc_tag '.avi']);
     elseif saveVideos && ~opt.save_avi
-        pth_out{i}=which([file_name '_ses' sprintf('%02d', i-1) mc_tag]);
+        pth_out{i}=which([file_name '_ses' sprintf('%02d', i) mc_tag]);
     end
 
     % Update frame index
