@@ -1,32 +1,50 @@
-function [dM,dA,dbA,D]=Add_NRmotion(M,A,bA,magnitude,plotme,translation_misalignment,msz)
-%%
-if ~exist('magnitude','var')
-    magnitude=2;
+function [dM,dA,dbA,D]=Add_NRmotion(M,A,bA,across_session_nonrigid,plotme,across_session_translation,across_session_nonrigid_scale)
+%% Add_NRmotion: misalign one session against the reference session.
+%
+% ACROSS-SESSION only. One warp, applied to the baseline and to every neuron
+% footprint of this session, so the whole recording sits in a shifted and bent
+% coordinate frame. It does not vary from frame to frame; the frame-to-frame
+% motion is applied later, inside Simulate_Ca_video.
+%
+% Inputs:
+%   M, A, bA                      baseline, neuron and blood-vessel footprints
+%   across_session_nonrigid       amplitude of the smooth warp, in pixels
+%   plotme                        draw the flow field and the warped frame
+%   across_session_translation    length of the rigid shift, in pixels. The
+%                                 direction is random, the length is this.
+%   across_session_nonrigid_scale Gaussian sigma in pixels used to smooth the
+%                                 random field, i.e. how broad the warp is
+%
+% Outputs:
+%   dM, dA, dbA  the warped inputs, cropped 20 px on every border
+%   D            the displacement field that was applied, same crop
+if ~exist('across_session_nonrigid','var')
+    across_session_nonrigid=2;
 end
 
 if ~exist('plotme','var')
     plotme=0;
 end
 
-if ~exist('translation_misalignment','var')
-    translation_misalignment=0;
+if ~exist('across_session_translation','var')
+    across_session_translation=0;
 end
 
-if ~exist('msz','var')
-    msz=60;
+if ~exist('across_session_nonrigid_scale','var')
+    across_session_nonrigid_scale=60;
 end
 
 [d1,d2]=size(M);
-img1=mat2gray(imgaussfilt(randn(d1,d2),msz,'FilterSize',2001,'Padding','circular'));
+img1=mat2gray(imgaussfilt(randn(d1,d2),across_session_nonrigid_scale,'FilterSize',2001,'Padding','circular'));
 [Gx,Gy] = imgradientxy(img1);
-if translation_misalignment>0
+if across_session_translation>0
     T=randn(1,2);
-    T=T*(translation_misalignment/sqrt(sum(T.^2)));
-    Gx=(mat2gray(Gx)-0.5)*2*magnitude+T(1);
-    Gy=(mat2gray(Gy)-0.5)*2*magnitude+T(2);
+    T=T*(across_session_translation/sqrt(sum(T.^2)));
+    Gx=(mat2gray(Gx)-0.5)*2*across_session_nonrigid+T(1);
+    Gy=(mat2gray(Gy)-0.5)*2*across_session_nonrigid+T(2);
 else
-    Gx=(mat2gray(Gx)-0.5)*2*magnitude;
-    Gy=(mat2gray(Gy)-0.5)*2*magnitude;
+    Gx=(mat2gray(Gx)-0.5)*2*across_session_nonrigid;
+    Gy=(mat2gray(Gy)-0.5)*2*across_session_nonrigid;
 end
 D=[];
 D(:,:,1)=Gy;

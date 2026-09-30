@@ -156,13 +156,28 @@ The `Simulate_Ca_video` function generates simulated calcium imaging videos with
 - **'d'**: Dimensions of the simulated video frames (width and height) in pixels.
 - **'F'**: Frame rate (frames per second) for the simulated calcium video data.
 - **'overlap'**: Proportion of neurons remapping across multiple sessions.
-- **'NR_misalignment'**: Inter-session non-rigid misalignment amplitude.
-- **'motion_sz'**: Size of the misalignment effect applied to the frames.
-- **'translation_misalignment'**: Add translation misalignment in addition to the non-rigid component.
-- **'session_motion_std'**: Within-session translational motion standard deviation in pixels.
-- **'session_motion_phi'**: Temporal smoothness (AR coefficient) for within-session motion.
-- **'session_motion_max'**: Optional cap on peak within-session displacement (pixels).
-- **'session_motion_seed'**: Seed offset for reproducible within-session motion.
+
+Two separate things move the image, and every option name says which one.
+`across_session_*` is one fixed warp per session, which is what the inter-session
+**alignment** stage has to undo. `within_session_*` is a different shift on every
+frame, which is what **motion correction** has to undo. They are independent: a
+session can be misaligned without shaking, shake without being misaligned, or both.
+
+Across-session misalignment:
+
+- **'across_session_nonrigid'**: Amplitude of the smooth warp between sessions, in pixels. `0` (default) means none.
+- **'across_session_nonrigid_scale'**: How broad that warp is, as the Gaussian sigma in pixels used to smooth the random field. Default `60`. Large values bend the frame in one slow sweep, small values ripple it.
+- **'across_session_translation'**: Length in pixels of the rigid shift between sessions. Default `1`. The direction is random, the length is this.
+
+Within-session motion (an AR(1) walk, so consecutive frames move together):
+
+- **'within_session_translation_std'**: Standard deviation in pixels of the whole-frame shake. Default `3`. A scalar applies to every session, or give one value per session so they differ.
+- **'within_session_nonrigid_std'**: Standard deviation in pixels of the bend applied on top of that shake. `0` (default) keeps the motion purely rigid.
+- **'within_session_nonrigid_grid'**: Control points per axis of that bend. Default `3`, i.e. a 3x3 grid.
+- **'within_session_motion_smoothness'**: AR(1) coefficient, shared by the shake and the bend. Default `0.99`. Near 1 gives slow drift, near 0 gives frame-to-frame jitter.
+- **'within_session_motion_max'**: Optional cap on peak displacement, in pixels.
+- **'within_session_motion_seed'**: Seed offset, for a reproducible trajectory.
+
 - **'ses'**: Number of sessions to be generated.
 - **'seed'**: Random number generator seed.
 - **'B'**: Baseline id for different baseline images.
@@ -193,7 +208,7 @@ The `Simulate_Ca_video` function generates simulated calcium imaging videos with
 [Mot, outpath, file_name, A, GT_motion_xy] = Simulate_Ca_video('Nneu', 50, 'ses', 1, 'F', 18000, 'LFP', 8, 'spike_prob', [-4.91, 0.83], 'sf', 60);
 
 % Example 3
-[Mot, outpath, file_name, A, GT_motion_xy] = Simulate_Ca_video('Nneu', 300, 'ses', 20, 'F', 1500, 'NR_misalignment', 0, 'min_dist', 2, 'spike_prob', [-2, 0.83], 'A2', true, 'overlap', 0.2);
+[Mot, outpath, file_name, A, GT_motion_xy] = Simulate_Ca_video('Nneu', 300, 'ses', 20, 'F', 1500, 'across_session_nonrigid', 0, 'min_dist', 2, 'spike_prob', [-2, 0.83], 'A2', true, 'overlap', 0.2);
 ```
 
 ### Detailed Function Workflow

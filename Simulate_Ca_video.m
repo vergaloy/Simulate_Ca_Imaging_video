@@ -1,9 +1,16 @@
 function [pth_out,outpath,Mot,file_name, A, GT_motion_xy, GT_nonrigid] = Simulate_Ca_video(varargin)
 % Simulate_Ca_video generates synthetic calcium imaging videos with optional across-session misalignment, within-session motion, and remapping.
 % It simulates neural activity, misalignment artifacts, baseline variability, and saves session-wise videos and metadata.
+%
+% Two separate things move the image, and every option name says which one:
+%   across_session_*  one fixed warp per session, what ALIGNMENT has to undo
+%   within_session_*  a different shift on every frame, what MOTION CORRECTION
+%                     has to undo
+% They are independent, so a session can be misaligned without shaking, shake
+% without being misaligned, or both.
 
 % Example usages:
-% Simulate_Ca_video('NR_misalignment',0,'Nneu',100,'ses',2,'CA1_A',true,'PNR',1);
+% Simulate_Ca_video('across_session_nonrigid',0,'Nneu',100,'ses',2,'CA1_A',true,'PNR',1);
 % Simulate_Ca_video('Nneu',300,'ses',20,'F',1500,...);
 % V = Simulate_Ca_video('save_videos',false,raw_data{1,:});
 
@@ -26,10 +33,10 @@ region_info = collect_region_info(opt, placement, C);
 
 % Apply synthetic non-rigid misalignment to neuron components for each session
 [BL(:,:,1), A{1,1}, bA{1,1}, Mot{1}] = Add_NRmotion(bl(:,:,1), A_GT{1}, bA_GT{1}, ...
-    0, opt.plotme, opt.translation_misalignment, opt.motion_sz);
+    0, opt.plotme, opt.across_session_translation, opt.across_session_nonrigid_scale);
 for i = 2:opt.ses
     [BL(:,:,i), A{1,i}, bA{1,i}, Mot{i}] = Add_NRmotion(bl(:,:,i), A_GT{i}, bA_GT{i}, ...
-        opt.NR_misalignment, opt.plotme, opt.translation_misalignment, opt.motion_sz);
+        opt.across_session_nonrigid, opt.plotme, opt.across_session_translation, opt.across_session_nonrigid_scale);
 end
 BL = v2uint8(BL);  % convert baseline to uint8
 
@@ -72,24 +79,24 @@ batch_sz = opt.batch_sz;
 % corrects each session on its own then crops each to its own valid region, so
 % equal amplitudes produce sessions that differ in size by a pixel or two and
 % never exercise the case where they differ properly.
-motion_std = opt.session_motion_std(:)';
+motion_std = opt.within_session_translation_std(:)';
 if isscalar(motion_std)
     motion_std = repmat(motion_std, 1, opt.ses);
 elseif numel(motion_std) ~= opt.ses
     error('Simulate_Ca_video:motionStd', ...
-        ['session_motion_std must be a scalar or one value per session. ' ...
+        ['within_session_translation_std must be a scalar or one value per session. ' ...
          'Got %d values for %d sessions.'], numel(motion_std), opt.ses);
 end
 
 % Within-session NON-RIGID amplitude, same rules. Translation moves the whole
 % frame; this bends it, so a piecewise-rigid corrector has something real to
 % find. Zero, the default, leaves the motion purely rigid as before.
-nr_std = opt.session_nonrigid_std(:)';
+nr_std = opt.within_session_nonrigid_std(:)';
 if isscalar(nr_std)
     nr_std = repmat(nr_std, 1, opt.ses);
 elseif numel(nr_std) ~= opt.ses
     error('Simulate_Ca_video:nonrigidStd', ...
-        ['session_nonrigid_std must be a scalar or one value per session. ' ...
+        ['within_session_nonrigid_std must be a scalar or one value per session. ' ...
          'Got %d values for %d sessions.'], numel(nr_std), opt.ses);
 end
 
@@ -98,13 +105,13 @@ for i = progress(1:opt.ses)
     % Precompute within-session motion, if any
     if std_i > 0
         prev_rng = rng;
-        if isempty(opt.session_motion_seed)
+        if isempty(opt.within_session_motion_seed)
             seed_i = opt.seed + i;
         else
-            seed_i = opt.session_motion_seed + i - 1;
+            seed_i = opt.within_session_motion_seed + i - 1;
         end
-        [dx, dy] = make_xy_motion_ar(F, opt.session_motion_phi, std_i, ...
-            opt.session_motion_max, seed_i);
+        [dx, dy] = make_xy_motion_ar(F, opt.within_session_motion_smoothness, std_i, ...
+            opt.within_session_motion_max, seed_i);
         rng(prev_rng);
         GT_motion_xy{i} = {dx, dy};
     else
@@ -119,13 +126,13 @@ for i = progress(1:opt.ses)
     nr_i = nr_std(i);
     if nr_i > 0
         prev_rng = rng;
-        if isempty(opt.session_motion_seed)
+        if isempty(opt.within_session_motion_seed)
             nr_seed = opt.seed + 1000 + i;
         else
-            nr_seed = opt.session_motion_seed + 1000 + i - 1;
+            nr_seed = opt.within_session_motion_seed + 1000 + i - 1;
         end
         [ctrl_xy, cdx, cdy] = make_nonrigid_motion_ar([d1, d2], F, ...
-            opt.nonrigid_grid, opt.session_motion_phi, nr_i, opt.session_motion_max, nr_seed);
+            opt.within_session_nonrigid_grid, opt.within_session_motion_smoothness, nr_i, opt.within_session_motion_max, nr_seed);
         nr_basis = tps_dense_basis(ctrl_xy, [d1, d2]);
         rng(prev_rng);
         GT_nonrigid{i} = {ctrl_xy, cdx, cdy};
@@ -406,15 +413,39 @@ addParameter(inp, 'F', 1000, valid_v)          % Frame rate (frames per second) 
 addParameter(inp, 'batch_sz', [], valid_batch) % Frames per batch (defaults to F)
 addParameter(inp, 'overlap', 1, valid_v)       % Proportion of neurons remapping across multiple sessions
 addParameter(inp, 'overlapMulti', 0, valid_v)  % Remapping strenght. 0 means 100% remapping (should be the opposite, sorry!)
-addParameter(inp, 'NR_misalignment', 0, valid_v)        % Inter-session non-rigid misalignment amplitude (0 for none)
-addParameter(inp, 'motion_sz', 60, valid_v)    % Size (magnitude) of the misalignment effect applied to the frames
-addParameter(inp, 'translation_misalignment', 1, valid_v)   % Add translation misalignment in addition to non-rigid component
-addParameter(inp, 'session_motion_std', 3, valid_v) % Within-session translational motion std (pixels). Scalar, or one value per session.
-addParameter(inp, 'session_motion_phi', 0.99, valid_v) % Temporal smoothness for within-session motion (AR coefficient)
-addParameter(inp, 'session_motion_max', [], @(x) isnumeric(x) || isempty(x)) % Optional peak cap for within-session motion
-addParameter(inp, 'session_motion_seed', [], valid_v) % Seed offset for reproducible within-session motion
-addParameter(inp, 'session_nonrigid_std', 0, valid_v)   % Within-session NON-RIGID amplitude (pixels). Scalar, or one value per session. 0 = purely rigid motion.
-addParameter(inp, 'nonrigid_grid', 3, valid_v)          % Control points per axis for the non-rigid field. 3 gives a 3x3 grid.
+% --- ACROSS-SESSION misalignment ------------------------------------------
+% One fixed warp per session, applied to the whole recording by Add_NRmotion.
+% This is what the inter-session ALIGNMENT stage has to undo. It does not vary
+% from frame to frame. Session 1 is the reference and gets no non-rigid warp.
+% across_session_nonrigid: amplitude of the smooth warp, in pixels. 0 = none.
+% across_session_nonrigid_scale: how broad that warp is, as the Gaussian sigma
+%   in pixels used to smooth the random field. Large values bend the frame in
+%   one slow sweep, small values ripple it.
+% across_session_translation: length in pixels of the rigid shift between
+%   sessions. The direction is random, the length is this. 0 = no shift.
+addParameter(inp, 'across_session_nonrigid', 0, valid_v)
+addParameter(inp, 'across_session_nonrigid_scale', 60, valid_v)
+addParameter(inp, 'across_session_translation', 1, valid_v)
+% --- WITHIN-SESSION motion -------------------------------------------------
+% Moves EVERY FRAME of a session on its own. This is what MOTION CORRECTION
+% has to undo, and it is independent of the across-session misalignment above.
+% The trajectory is an AR(1) walk, so consecutive frames move together.
+% within_session_translation_std: std in pixels of the whole-frame shake.
+%   Scalar for every session, or one value per session so they differ.
+% within_session_nonrigid_std: std in pixels of the BEND applied on top of that
+%   shake, which is what a piecewise-rigid corrector has to find. 0 = the
+%   motion stays purely rigid.
+% within_session_nonrigid_grid: control points per axis of the bend. 3 = 3x3.
+% within_session_motion_smoothness: AR(1) coefficient, shared by the shake and
+%   the bend. Near 1 gives slow drift, near 0 gives frame-to-frame jitter.
+% within_session_motion_max: optional cap in pixels on peak displacement.
+% within_session_motion_seed: seed offset, for a reproducible trajectory.
+addParameter(inp, 'within_session_translation_std', 3, valid_v)
+addParameter(inp, 'within_session_nonrigid_std', 0, valid_v)
+addParameter(inp, 'within_session_nonrigid_grid', 3, valid_v)
+addParameter(inp, 'within_session_motion_smoothness', 0.99, valid_v)
+addParameter(inp, 'within_session_motion_max', [], @(x) isnumeric(x) || isempty(x))
+addParameter(inp, 'within_session_motion_seed', [], valid_v)
 addParameter(inp, 'ses', 2, valid_v)           % Number of sessions to be generated
 addParameter(inp, 'seed', 'shuffle')           % Random number generator seed ('shuffle' for a new seed each run)
 addParameter(inp, 'B', '1')                    % Baseline id (1-8). Different valeus used different baseline images
@@ -437,6 +468,8 @@ addParameter(inp, 'scale', 1)                  % Resize the dimensions of A
 addParameter(inp, 'save_mat', 1, valid_bool)   % Whether to save metadata (.mat) files
 addParameter(inp, 'save_GT', 1, valid_bool)    % Whether to save GT video
 varargin=varargin{1, 1};
+
+reject_renamed_options(varargin);
 
 inp.KeepUnmatched = true;
 parse(inp,varargin{:});
@@ -576,5 +609,43 @@ Yout = zeros(size(Y),'like',Y);
 for k=1:T
     Yout(:,:,k) = imtranslate(Y(:,:,k), [dx(k) dy(k)], 'linear', ...
         'OutputView','same','FillValues',0);
+end
+end
+function reject_renamed_options(args)
+%% Stop a script that still uses the old motion and misalignment names.
+%
+% The old names did not say WHICH of the two effects they controlled.
+% NR_misalignment and session_nonrigid_std were both non-rigid,
+% translation_misalignment and session_motion_std were both translations, and
+% motion_sz said "motion" while it sized an across-session warp. Every name now
+% starts with the timescale it acts on: across_session_ or within_session_.
+%
+% This has to be checked by hand because KeepUnmatched is on, so an old name
+% would otherwise be accepted, silently ignored, and the simulation would run
+% with the default instead of the value that was asked for.
+
+renamed = {
+    'NR_misalignment',          'across_session_nonrigid'
+    'motion_sz',                'across_session_nonrigid_scale'
+    'translation_misalignment', 'across_session_translation'
+    'session_motion_std',       'within_session_translation_std'
+    'session_nonrigid_std',     'within_session_nonrigid_std'
+    'nonrigid_grid',            'within_session_nonrigid_grid'
+    'session_motion_phi',       'within_session_motion_smoothness'
+    'session_motion_max',       'within_session_motion_max'
+    'session_motion_seed',      'within_session_motion_seed'
+    };
+
+for k = 1:2:numel(args)
+    if ~(ischar(args{k}) || isstring(args{k})), continue; end
+    hit = strcmpi(char(args{k}), renamed(:,1));
+    if any(hit)
+        error('Simulate_Ca_video:renamedOption', ...
+            ['"%s" was renamed to "%s". Every motion option now starts with ' ...
+             'the timescale it acts on: across_session_ for the fixed warp ' ...
+             'between sessions, within_session_ for the frame-to-frame ' ...
+             'motion inside one session.'], ...
+            renamed{hit,1}, renamed{hit,2});
+    end
 end
 end
