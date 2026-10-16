@@ -1,4 +1,7 @@
-function [Aout,bA,C,S,LFP,placement]=create_neuron_data(opt)
+function [Aout,bA,C,S,LFP,placement,Cb]=create_neuron_data(opt)
+% Cb: traces of the background components in bA. Empty under
+% background = 'per_cell', where each halo follows its own cell and the caller
+% drives bA with C, as before.
 %% Create Mask
 if opt.create_mask
     BW=create_heart_mask(opt.d);
@@ -53,10 +56,38 @@ end
 S=fix_inactive(S);
 C=conv_spikes(S,invtRise,invtDecay,size(S,2));
 
+% Independent background: its own activity, drawn like that of out-of-focus
+% cells from the same rate and kinetics distributions, but from a stream of its
+% own so the neurons, the motion and the noise come out as without it.
+Cb = [];
+if ~strcmp(opt.background, 'per_cell')
+    prev_rng = rng;
+    rng(background_seed(opt, 1), 'twister');
+    nb = size(bA{1}, 3);
+    Pb = lognrnd(spike_prob(1), spike_prob(2), nb, 1);
+    Sb = [];
+    for i = 1:opt.ses
+        Sb = [Sb, create_random_spike(nb, opt.F, opt.sf, Pb, 0, 1, opt.force_active)]; %#ok<AGROW>
+    end
+    Sb = fix_inactive(Sb);
+    Cb = conv_spikes(Sb, invtRise, invtDecay, size(Sb, 2));
+    rng(prev_rng);
+end
+
 
 % C=C.*(1+randn(length(X),1).*0.2);
 %
 
+end
+
+
+function s = background_seed(opt, k)
+% Seed of the background's own stream: fixed with the simulation's seed.
+if isnumeric(opt.seed)
+    s = opt.seed + 3000 + k;
+else
+    s = 'shuffle';
+end
 end
 
 
@@ -126,6 +157,7 @@ end
 % opt.scale resizes the kernels or a different footprint library is used.
 placement.gSig_fullres = footprint_gsig(As(:,:,:,1));
 
+Bg = independent_background(opt, As);   % [] under background = 'per_cell'
 for s=1:opt.ses
     Aout_t=[];
     bA_t=[];
@@ -133,10 +165,16 @@ for s=1:opt.ses
         Z=zeros(opt.d);
         Z(Y(i),X(i))=1;
         Aout_t(:,:,i)=conv2(Z, As(:,:,i,s), 'same');
-        bA_t(:,:,i)=imgaussfilt(Aout_t(:,:,i),10,'FilterSize',opt.d(2)+1);
+        if isempty(Bg)
+            bA_t(:,:,i)=imgaussfilt(Aout_t(:,:,i),10,'FilterSize',opt.d(2)+1);
+        end
     end
     Aout_t=Aout_t./max(Aout_t,[],'all');
-    bA_t=bA_t./max(bA_t,[],'all');
+    if isempty(Bg)
+        bA_t=bA_t./max(bA_t,[],'all');
+    else
+        bA_t=Bg;
+    end
     if opt.plotme
         figure;imshow(max(Aout_t,[],3));
         figure;imshow(max(bA_t,[],3));
@@ -145,6 +183,34 @@ for s=1:opt.ses
     bA{s}=bA_t;
 end
 
+end
+
+
+function Bg = independent_background(opt, As)
+% Out-of-focus background as sources of its own: opt.n_background blurred
+% footprints, placed anywhere in the frame independently of the in-focus cells
+% and driven by traces of their own (Cb, in create_neuron_data). It used to be
+% one blurred copy of each cell, driven by that cell's trace, so every bit of
+% the background followed some neuron exactly. The shapes and the blur are the
+% same as those halos; the same sources are used in every session.
+Bg = [];
+if strcmp(opt.background, 'per_cell')
+    return
+end
+prev_rng = rng;
+rng(background_seed(opt, 0), 'twister');
+nb = opt.n_background;
+bx = randi(opt.d(2), 1, nb);
+by = randi(opt.d(1), 1, nb);
+shape = randi(size(As, 3), 1, nb);
+rng(prev_rng);
+Bg = zeros([opt.d, nb]);
+for j = 1:nb
+    Z = zeros(opt.d);
+    Z(by(j), bx(j)) = 1;
+    Bg(:,:,j) = imgaussfilt(conv2(Z, As(:,:,shape(j),1), 'same'), 10, 'FilterSize', opt.d(2)+1);
+end
+Bg = Bg ./ max(Bg, [], 'all');
 end
 
 

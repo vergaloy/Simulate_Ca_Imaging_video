@@ -20,7 +20,7 @@ outpath = get_out_path(opt);  % choose output folder if saving enabled
 
 %% Generate synthetic data
 bl = create_baseline(opt);  % create session-specific background baselines
-[A_GT, bA_GT, C, S, LFP, placement] = create_neuron_data(opt);  % simulate neurons and temporal traces
+[A_GT, bA_GT, C, S, LFP, placement, Cb] = create_neuron_data(opt);  % simulate neurons, background and traces
 opt.Nneu2 = size(A_GT{1,1}, 3);  % store number of neurons
 
 C = add_remapping_drifting(C, opt);  % apply remapping or activity drift if needed
@@ -30,6 +30,20 @@ C = add_remapping_drifting(C, opt);  % apply remapping or activity drift if need
 % thresholding lowers it and the calcium kernel raises it again, so the trace
 % correlation has to be measured and stored, never assumed.
 region_info = collect_region_info(opt, placement, C);
+
+% Optional slow cyclic baseline, added after the coherence is measured so that
+% region_info keeps describing the transients. Off unless slow_amp > 0.
+[C, C_slow] = add_slow_baseline(C, opt, opt.slow_amp, 2000);
+
+% Background traces. Under 'per_cell' each halo follows its own cell, as it
+% always did; otherwise the background has traces of its own, and an optional
+% slow cycle of its own (slow_bg_amp), independent of the neurons'.
+if isempty(Cb)
+    Cb = C;
+    Cb_slow = C_slow;
+else
+    [Cb, Cb_slow] = add_slow_baseline(Cb, opt, opt.slow_bg_amp, 2500);
+end
 
 % Apply synthetic non-rigid misalignment to neuron components for each session
 [BL(:,:,1), A{1,1}, bA{1,1}, Mot{1}] = Add_NRmotion(bl(:,:,1), A_GT{1}, bA_GT{1}, ...
@@ -176,7 +190,7 @@ for i = progress(1:opt.ses)
 
         % --- Generate simulated session data in batches ---
         V_batch = v2uint8(reshape(reshape(A{i}, d1*d2, []) * C(:, global_idx), d1, d2, []) + ...
-            reshape(reshape(bA{i}, d1*d2, []) * C(:, global_idx), d1, d2, []));
+            reshape(reshape(bA{i}, d1*d2, []) * Cb(:, global_idx), d1, d2, []));
 
         % Add smoothed noise
         N_batch = rand(d1, d2, numel(batch_frames), 'single');
@@ -219,7 +233,7 @@ for i = progress(1:opt.ses)
         % --- Ground truth generation ---
         if saveGT
             V_GT_batch = v2uint8(reshape(reshape(tA, d1*d2, []) * C(:, global_idx), d1, d2, []) + ...
-                reshape(reshape(tbA, d1*d2, []) * C(:, global_idx), d1, d2, []));
+                reshape(reshape(tbA, d1*d2, []) * Cb(:, global_idx), d1, d2, []));
             matGT.GT(:, :, global_idx) = V_GT_batch;  % memory-safe write
         end
 
@@ -254,7 +268,7 @@ end
 
 if saveMat
     % Save simulation metadata (everything else)
-    save([file_name '_meta.mat'], 'A_GT', 'A', 'C', 'S', 'BL', 'opt', 'Mot', 'LFP', 'GT_motion_xy', 'GT_nonrigid', 'placement', 'region_info', '-v7.3');
+    save([file_name '_meta.mat'], 'A_GT', 'A', 'C', 'S', 'BL', 'opt', 'Mot', 'LFP', 'GT_motion_xy', 'GT_nonrigid', 'placement', 'region_info', 'C_slow', 'Cb', 'Cb_slow', '-v7.3');
 end
 
 if ~(saveVideos || saveMat || saveGT)
@@ -454,6 +468,12 @@ addParameter(inp, 'save_videos', true, valid_bool)          % Flag to save sessi
 addParameter(inp, 'create_mask', true)         % Flag to create a mask during the simulation (true/false)
 addParameter(inp, 'comb_fact', 0, valid_v)     % Combination factor used in the simulation process
 addParameter(inp, 'drift', 0, valid_v)         % Presence of drifting activities in the simulated data (0 or 1)
+addParameter(inp, 'slow_amp', 0, valid_v)      % Slow cyclic baseline: peak-to-trough, as a fraction of each neuron's peak (0 = none)
+addParameter(inp, 'slow_period', [20 60], valid_v) % Its period in seconds, drawn uniformly per neuron from [min max]
+addParameter(inp, 'slow_fraction', 1, valid_v) % Fraction of neurons that carry it
+addParameter(inp, 'background', 'independent', @(x) any(strcmp(x, {'independent', 'per_cell'}))) % 'independent': n_background sources with their own traces; 'per_cell': one blurred copy of each cell, driven by it (the old behaviour)
+addParameter(inp, 'n_background', 50, valid_v) % Number of independent background sources
+addParameter(inp, 'slow_bg_amp', 0, valid_v)   % Slow cyclic baseline of the background sources, as slow_amp is for the neurons (0 = none)
 addParameter(inp, 'LFP', 0, valid_v)           % Flag to simulate Local Field Potentials (LFP) data (0 or 1)
 addParameter(inp, 'sf', 10, valid_v)           % Scaling factor used in the simulation process
 addParameter(inp, 'plotme', 0, valid_v)        % Flag to generate plots during simulation (0 or 1)
@@ -558,6 +578,31 @@ else
 end
 
 
+end
+
+function [C, C_slow] = add_slow_baseline(C, opt, slow_amp, seed_offset)
+% A slow cyclic baseline per trace: a raised cosine from 0 to slow_amp times
+% the trace's peak, with its own period (slow_period, seconds) and phase. It is
+% added to the trace and returned on its own (C_slow) so what is recovered can
+% be scored. It draws from a stream of its own (seed + seed_offset), so the rest
+% of the recording is the same as without it.
+C_slow = zeros(size(C), 'like', C);
+if slow_amp <= 0
+    return
+end
+if isnumeric(opt.seed)
+    rs = RandStream('mt19937ar', 'Seed', opt.seed + seed_offset);
+else
+    rs = RandStream('mt19937ar', 'Seed', 'shuffle');
+end
+N = size(C, 1);
+t = (0:size(C, 2) - 1) / opt.sf;                       % seconds
+period = opt.slow_period(1) + rand(rs, N, 1) * diff(opt.slow_period([1 end]));
+phase = 2*pi*rand(rs, N, 1);
+has = rand(rs, N, 1) < opt.slow_fraction;
+amp = slow_amp * max(C, [], 2) .* has;
+C_slow = cast(amp .* (1 - cos(2*pi*t ./ period + phase)) / 2, 'like', C);
+C = C + C_slow;
 end
 
 function C=add_remapping_drifting(C,opt)
