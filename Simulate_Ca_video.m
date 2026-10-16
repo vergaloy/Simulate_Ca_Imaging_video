@@ -8,6 +8,13 @@ function [pth_out,outpath,Mot,file_name, A, GT_motion_xy, GT_nonrigid] = Simulat
 %                     has to undo
 % They are independent, so a session can be misaligned without shaking, shake
 % without being misaligned, or both.
+%
+% Optional, all off by default: motion whose character changes over time
+% (rigid-only and bend stretches, local bends, sudden jumps; make_motion_regimes)
+% and a camera model that integrates each pixel over a band-limited scene
+% (camera_supersample; camera_setup). With any of them on, the within-session
+% motion is composed into one field per frame and applied once
+% (apply_camera_motion); with all of them off nothing changes, bit for bit.
 
 % Example usages:
 % Simulate_Ca_video('across_session_nonrigid',0,'Nneu',100,'ses',2,'CA1_A',true,'PNR',1);
@@ -114,6 +121,13 @@ elseif numel(nr_std) ~= opt.ses
          'Got %d values for %d sessions.'], numel(nr_std), opt.ses);
 end
 
+% Regimes, local bends, jumps and the camera model (see the header). The path
+% below is taken only when one of them is on.
+rp = regime_options(opt);
+use_camera = opt.camera_supersample > 1 || ~isempty(rp.rigid_frames) || ...
+    rp.local_bends > 0 || rp.jumps > 0;
+GT_regimes = cell(1, opt.ses);
+
 for i = progress(1:opt.ses)
     std_i = motion_std(i);
     % Precompute within-session motion, if any
@@ -155,8 +169,29 @@ for i = progress(1:opt.ses)
         GT_nonrigid{i} = [];
     end
 
+    % Regimes, local bends and jumps, from a stream of their own, and the
+    % camera that applies all the within-session motion in one go.
+    cam_i = [];
+    moves = std_i > 0 || nr_i > 0;
+    if use_camera
+        if isempty(opt.within_session_motion_seed)
+            r_seed = opt.seed + 3000 + i;
+        else
+            r_seed = opt.within_session_motion_seed + 3000 + i - 1;
+        end
+        R_i = make_motion_regimes([d1, d2], F, rp, r_seed);
+        R_i.camera_supersample = max(1, round(opt.camera_supersample));
+        mo = struct('dx', zeros(1, F), 'dy', zeros(1, F), ...
+            'ctrl_xy', [], 'cdx', [], 'cdy', [], 'R', R_i);
+        if std_i > 0, mo.dx = dx; mo.dy = dy; end
+        if nr_i > 0, mo.ctrl_xy = ctrl_xy; mo.cdx = cdx; mo.cdy = cdy; end
+        cam_i = camera_setup([d1, d2], R_i.camera_supersample, mo);
+        GT_regimes{i} = R_i;
+        moves = moves || ~isempty(R_i.bumps) || ~isempty(R_i.jumps);
+    end
+
     % Session output setup
-    if std_i==0 && nr_i==0
+    if ~moves
         mc_tag='_mc';
     else
         mc_tag='';
@@ -204,19 +239,24 @@ for i = progress(1:opt.ses)
             (1 - mult) * N_batch * (1 - 1 / (1 / PNR + 1));
         FV_batch = v2uint8(FV_batch);
 
-        % Apply within-session translational motion if requested
-        if std_i > 0
-            FV_batch = apply_xy_translation(single(FV_batch), dx(batch_frames), dy(batch_frames));
-            FV_batch = v2uint8(FV_batch);
-        end
+        if isempty(cam_i)
+            % Apply within-session translational motion if requested
+            if std_i > 0
+                FV_batch = apply_xy_translation(single(FV_batch), dx(batch_frames), dy(batch_frames));
+                FV_batch = v2uint8(FV_batch);
+            end
 
-        % Then bend it. Translation first, deformation second, which is the order
-        % a correction pipeline undoes them in: a whole-frame shift, then what is
-        % left over.
-        if nr_i > 0
-            FV_batch = apply_nonrigid_motion(single(FV_batch), nr_basis, ...
-                cdx(:, batch_frames), cdy(:, batch_frames));
-            FV_batch = v2uint8(FV_batch);
+            % Then bend it. Translation first, deformation second, which is the order
+            % a correction pipeline undoes them in: a whole-frame shift, then what is
+            % left over.
+            if nr_i > 0
+                FV_batch = apply_nonrigid_motion(single(FV_batch), nr_basis, ...
+                    cdx(:, batch_frames), cdy(:, batch_frames));
+                FV_batch = v2uint8(FV_batch);
+            end
+        else
+            % All of it at once, through the camera model.
+            FV_batch = apply_camera_motion(FV_batch, batch_frames, cam_i);
         end
 
         % --- Save session output video ---
@@ -253,7 +293,7 @@ for i = progress(1:opt.ses)
     ix2 = ix2 + F;
 
     % Clean session variables from memory
-    clear tA tbA dx dy
+    clear tA tbA dx dy cam_i mo
 end
 
 %% Final saving
@@ -268,7 +308,7 @@ end
 
 if saveMat
     % Save simulation metadata (everything else)
-    save([file_name '_meta.mat'], 'A_GT', 'A', 'C', 'S', 'BL', 'opt', 'Mot', 'LFP', 'GT_motion_xy', 'GT_nonrigid', 'placement', 'region_info', 'C_slow', 'Cb', 'Cb_slow', '-v7.3');
+    save([file_name '_meta.mat'], 'A_GT', 'A', 'C', 'S', 'BL', 'opt', 'Mot', 'LFP', 'GT_motion_xy', 'GT_nonrigid', 'GT_regimes', 'placement', 'region_info', 'C_slow', 'Cb', 'Cb_slow', '-v7.3');
 end
 
 if ~(saveVideos || saveMat || saveGT)
@@ -460,6 +500,55 @@ addParameter(inp, 'within_session_nonrigid_grid', 3, valid_v)
 addParameter(inp, 'within_session_motion_smoothness', 0.99, valid_v)
 addParameter(inp, 'within_session_motion_max', [], @(x) isnumeric(x) || isempty(x))
 addParameter(inp, 'within_session_motion_seed', [], valid_v)
+% --- WITHIN-SESSION motion that changes over time (optional, off) ----------
+% Drawn by make_motion_regimes from a stream of its own (seed + 3000 + session),
+% so turning it on changes nothing else in the recording. Any of these, or
+% camera_supersample > 1, switches every frame to the camera path: the shake,
+% the bend and these are composed into one field and applied once.
+% within_session_rigid_frames: [min max] length in frames of the rigid-only
+%   stretches. [] (default) = no regimes, the bend is on throughout.
+% within_session_bend_frames: [min max] length of the stretches with bends.
+% within_session_regime_ramp: frames over which the bends fade in and out.
+% within_session_local_bends: how many local bends are under way at once, on
+%   average, inside a bend stretch. 0 (default) = none.
+% within_session_local_bend_width: [min max] Gaussian sigma in pixels, drawn
+%   log-uniformly.
+% within_session_local_bend_amp: [min max] peak displacement in pixels.
+% within_session_local_bend_life: [min max] lifetime in frames.
+% within_session_local_bend_strain: cap on the peak strain (largest gradient)
+%   of one bend, which caps the amplitude of the narrow ones.
+% within_session_local_bend_inset: keep the bend centres this many pixels away
+%   from the frame border (e.g. out of a margin that will be cropped).
+% within_session_jumps: sudden rigid jumps per 1000 frames. 0 (default) = none.
+% within_session_jump_size: [min max] length of a jump in pixels.
+% within_session_jump_held: fraction of jumps that stay at the new place; the
+%   others decay back exponentially.
+% within_session_jump_decay: [min max] decay time constant in frames.
+% within_session_jump_bound: no jump lands farther than this from the start.
+% within_session_jump_gap: minimum frames between two jumps.
+addParameter(inp, 'within_session_rigid_frames', [], @(x) isempty(x) || isnumeric(x))
+addParameter(inp, 'within_session_bend_frames', [100 300], valid_v)
+addParameter(inp, 'within_session_regime_ramp', 10, valid_v)
+addParameter(inp, 'within_session_local_bends', 0, valid_v)
+addParameter(inp, 'within_session_local_bend_width', [10 40], valid_v)
+addParameter(inp, 'within_session_local_bend_amp', [0.5 3], valid_v)
+addParameter(inp, 'within_session_local_bend_life', [40 200], valid_v)
+addParameter(inp, 'within_session_local_bend_strain', 0.1, valid_v)
+addParameter(inp, 'within_session_local_bend_inset', 0, valid_v)
+addParameter(inp, 'within_session_jumps', 0, valid_v)
+addParameter(inp, 'within_session_jump_size', [5 15], valid_v)
+addParameter(inp, 'within_session_jump_held', 0.5, valid_v)
+addParameter(inp, 'within_session_jump_decay', [10 40], valid_v)
+addParameter(inp, 'within_session_jump_bound', 15, valid_v)
+addParameter(inp, 'within_session_jump_gap', 100, valid_v)
+% --- Camera model (optional, off) ------------------------------------------
+% camera_supersample: s > 1 records every frame as a camera would: each pixel
+%   averages a band-limited version of the scene at s x s points, after the
+%   within-session motion has moved it (camera_setup, apply_camera_motion).
+%   The old path interpolates bilinearly, which pulls any correlation engine
+%   about 0.1 px toward whole pixels; this does not. Odd s keeps the middle
+%   sample on the pixel centre. 1 (default) = off.
+addParameter(inp, 'camera_supersample', 1, valid_v)
 addParameter(inp, 'ses', 2, valid_v)           % Number of sessions to be generated
 addParameter(inp, 'seed', 'shuffle')           % Random number generator seed ('shuffle' for a new seed each run)
 addParameter(inp, 'B', '1')                    % Baseline id (1-8). Different valeus used different baseline images
@@ -656,6 +745,18 @@ for k=1:T
         'OutputView','same','FillValues',0);
 end
 end
+function p = regime_options(opt)
+% The within_session_* options make_motion_regimes reads, without the prefix.
+names = {'rigid_frames', 'bend_frames', 'regime_ramp', 'local_bends', ...
+    'local_bend_width', 'local_bend_amp', 'local_bend_life', 'local_bend_strain', ...
+    'local_bend_inset', 'jumps', 'jump_size', 'jump_held', 'jump_decay', ...
+    'jump_bound', 'jump_gap'};
+p = struct();
+for k = 1:numel(names)
+    p.(names{k}) = opt.(['within_session_' names{k}]);
+end
+end
+
 function reject_renamed_options(args)
 %% Stop a script that still uses the old motion and misalignment names.
 %

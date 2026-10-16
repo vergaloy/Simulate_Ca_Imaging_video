@@ -178,6 +178,39 @@ Within-session motion (an AR(1) walk, so consecutive frames move together):
 - **'within_session_motion_max'**: Optional cap on peak displacement, in pixels.
 - **'within_session_motion_seed'**: Seed offset, for a reproducible trajectory.
 
+Within-session motion that changes character over time, all off by default
+(`make_motion_regimes`; drawn from a stream of its own, seed + 3000 + session, so
+switching it on changes nothing else in the recording):
+
+- **'within_session_rigid_frames'**: `[min max]` length in frames of rigid-only stretches. `[]` (default) = no regimes, the bend is on throughout. Rigid and bend stretches alternate; the bends (spline and local) are multiplied by a weight that is 0 in a rigid stretch and 1 in a bend stretch.
+- **'within_session_bend_frames'**: `[min max]` length of the stretches with bends. Default `[100 300]`.
+- **'within_session_regime_ramp'**: Frames over which the bends fade in and out at a regime change. Default `10`.
+- **'within_session_local_bends'**: Average number of local bends under way at once inside a bend stretch. `0` (default) = none. A local bend is a Gaussian bump of displacement at a random place that fades in and out over its lifetime; half are *shift* bumps (a patch slides one way), half *swell* bumps (it pushes out from, or pulls into, a centre, so the patch as a whole barely moves).
+- **'within_session_local_bend_width'**: `[min max]` Gaussian sigma in pixels, log-uniform. Default `[10 40]`.
+- **'within_session_local_bend_amp'**: `[min max]` peak displacement in pixels. Default `[0.5 3]`.
+- **'within_session_local_bend_life'**: `[min max]` lifetime in frames. Default `[40 200]`.
+- **'within_session_local_bend_strain'**: Cap on a bump's peak strain (largest gradient of its displacement), which caps the amplitude of the narrow ones. Default `0.1`.
+- **'within_session_local_bend_inset'**: Keep bump centres this many pixels from the frame border. Default `0`.
+- **'within_session_jumps'**: Sudden rigid jumps per 1000 frames. `0` (default) = none.
+- **'within_session_jump_size'**: `[min max]` jump length in pixels. Default `[5 15]`.
+- **'within_session_jump_held'**: Fraction of jumps that stay at the new place; the others decay back exponentially. Default `0.5`.
+- **'within_session_jump_decay'**: `[min max]` decay time constant in frames. Default `[10 40]`.
+- **'within_session_jump_bound'**: No jump lands farther than this many pixels from the start. Default `15`.
+- **'within_session_jump_gap'**: Minimum frames between two jumps. Default `100`.
+
+Camera model, off by default:
+
+- **'camera_supersample'**: `s > 1` records every frame as a camera does. The scene is the band-limited interpolant of the simulated frame (`dct_interp_matrix`), the within-session motion moves it, and each pixel averages it at the centres of `s x s` sub-pixels (`camera_setup`, `apply_camera_motion`). The default path moves frames by bilinear interpolation, which blurs each frame by an amount that depends on its fractional shift and pulls any correlation engine about 0.1 px toward whole pixels; this path does not (the pull falls below 0.005 px). Odd `s` keeps the middle sub-pixel on the pixel centre. `1` (default) = off.
+
+With any of these on, every frame takes one path: the shake, the spline bend, the
+regimes, the local bends and the jumps are composed into one field
+(`within_session_field`) and applied once, with no intermediate `v2uint8`, so a
+frame keeps the grey levels of the still scene. The motion-free twin is the same
+call with the motion switched off and `camera_supersample` kept. The draws are
+saved in `*_meta.mat` as `GT_regimes{session}` (`bend_weight`, `stretches`,
+`bumps`, `jumps`, `jump_xy`, `camera_supersample`). With all of them off, the
+recording is the same as before, bit for bit, for a given seed.
+
 - **'ses'**: Number of sessions to be generated.
 - **'seed'**: Random number generator seed.
 - **'B'**: Baseline id for different baseline images.
