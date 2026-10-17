@@ -15,6 +15,12 @@ function [pth_out,outpath,Mot,file_name, A, GT_motion_xy, GT_nonrigid] = Simulat
 % (camera_supersample; camera_setup). With any of them on, the within-session
 % motion is composed into one field per frame and applied once
 % (apply_camera_motion); with all of them off nothing changes, bit for bit.
+%
+% Also optional: sensor noise (sensor_noise), white noise added to each frame
+% after the motion, before the camera rounds it, so it does not move with the
+% tissue; and
+% scene_noise = false, which leaves the per-frame noise out of the scene. Both
+% together move the noise from the scene to the sensor.
 
 % Example usages:
 % Simulate_Ca_video('across_session_nonrigid',0,'Nneu',100,'ses',2,'CA1_A',true,'PNR',1);
@@ -219,6 +225,11 @@ for i = progress(1:opt.ses)
         matGT.GT = zeros(d1, d2, F * opt.ses, 'uint8');  % preallocate on disk
     end
 
+    rs_noise = [];
+    if opt.sensor_noise > 0
+        rs_noise = RandStream('mt19937ar', 'Seed', opt.seed + 4000 + i);
+    end
+
     for start_idx = progress(1:batch_sz:F)
         batch_frames = start_idx:min(start_idx + batch_sz - 1, F);
         global_idx = session_frames(batch_frames);
@@ -237,7 +248,19 @@ for i = progress(1:opt.ses)
         FV_batch = mult * BL(:, :, i) + ...
             (1 - mult) * V_batch * (1 / (1 / PNR + 1)) + ...
             (1 - mult) * N_batch * (1 - 1 / (1 / PNR + 1));
-        FV_batch = v2uint8(FV_batch);
+        if opt.scene_noise
+            FV_batch = v2uint8(FV_batch);
+        else
+            % The same scene without its per-frame noise: the noise is still
+            % drawn (the stream advances as always) but replaced by its mean,
+            % and the frame keeps the grey scale it would have had with it.
+            lo = double(min(FV_batch, [], 'all'));
+            rg = double(range(FV_batch, 'all'));
+            FV_batch = mult * BL(:, :, i) + ...
+                (1 - mult) * V_batch * (1 / (1 / PNR + 1)) + ...
+                (1 - mult) * mean(N_batch, 'all') * (1 - 1 / (1 / PNR + 1));
+            FV_batch = uint8((double(FV_batch) - lo) / rg * 2^8);
+        end
 
         if isempty(cam_i)
             % Apply within-session translational motion if requested
@@ -255,8 +278,22 @@ for i = progress(1:opt.ses)
                 FV_batch = v2uint8(FV_batch);
             end
         else
-            % All of it at once, through the camera model.
-            FV_batch = apply_camera_motion(FV_batch, batch_frames, cam_i);
+            % All of it at once, through the camera model, with the sensor
+            % noise added before the camera rounds each frame (see
+            % apply_camera_motion for why the order matters).
+            FV_batch = apply_camera_motion(FV_batch, batch_frames, cam_i, ...
+                opt.sensor_noise, rs_noise);
+        end
+
+        % Sensor noise without the camera: after the last warp (each of which
+        % rounds). White, independent per pixel and per frame, one frame at a
+        % time from a stream of its own, so the draw does not depend on the
+        % batch size and the motion-free twin gets the same one.
+        if opt.sensor_noise > 0 && isempty(cam_i)
+            for k = 1:size(FV_batch, 3)
+                FV_batch(:, :, k) = uint8(double(FV_batch(:, :, k)) + ...
+                    opt.sensor_noise * randn(rs_noise, d1, d2));
+            end
         end
 
         % --- Save session output video ---
@@ -549,6 +586,21 @@ addParameter(inp, 'within_session_jump_gap', 100, valid_v)
 %   about 0.1 px toward whole pixels; this does not. Odd s keeps the middle
 %   sample on the pixel centre. 1 (default) = off.
 addParameter(inp, 'camera_supersample', 1, valid_v)
+% --- Sensor noise (optional, off) ------------------------------------------
+% sensor_noise: standard deviation, in grey levels, of white Gaussian noise
+%   added to every recorded frame after the motion, independent per pixel and
+%   per frame, from a stream of its own (seed + 4000 + session): it does not
+%   move with the tissue, and a motion-free twin gets the same draw. With the
+%   camera model it is added before the camera rounds the frame, as a sensor
+%   is read out and digitised once; without it, after the last warp. Rounded
+%   and clipped to uint8. 0 (default) = none.
+% scene_noise: false leaves the per-frame noise out of the scene (it is still
+%   drawn, and replaced by its mean, so the grey scale and everything else stay
+%   as they were). true (default) = as always: the noise is part of the scene,
+%   so it moves with the tissue and the camera averages it. 'scene_noise',
+%   false with 'sensor_noise', s moves the noise from the scene to the sensor.
+addParameter(inp, 'sensor_noise', 0, valid_v)
+addParameter(inp, 'scene_noise', true, valid_bool)
 addParameter(inp, 'ses', 2, valid_v)           % Number of sessions to be generated
 addParameter(inp, 'seed', 'shuffle')           % Random number generator seed ('shuffle' for a new seed each run)
 addParameter(inp, 'B', '1')                    % Baseline id (1-8). Different valeus used different baseline images

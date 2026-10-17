@@ -211,6 +211,11 @@ saved in `*_meta.mat` as `GT_regimes{session}` (`bend_weight`, `stretches`,
 `bumps`, `jumps`, `jump_xy`, `camera_supersample`). With all of them off, the
 recording is the same as before, bit for bit, for a given seed.
 
+Noise, both off by default:
+
+- **'sensor_noise'**: Standard deviation, in grey levels, of white Gaussian noise added to every recorded frame after the motion: independent per pixel and per frame, rounded and clipped to `uint8`. With the camera model it goes in before the camera rounds the frame, as a sensor is digitised once: rounded first, a smooth noise-free scene becomes flat steps whose edges move in whole-pixel steps, which pulls registration toward whole pixels (about 0.08 px), and noise added afterwards does not undo it. Without the camera model it is added after the last warp. It is drawn from a stream of its own (seed + 4000 + session), so it does not move with the tissue, a motion-free twin gets the same draw, and the rest of the recording is unchanged. `0` (default) = none.
+- **'scene_noise'**: `false` leaves the per-frame noise out of the scene. The noise is still drawn and is replaced by its mean, so the frame keeps the grey scale it would have had and every other draw is unchanged. `true` (default) = as always: the noise is part of the scene, moves with the tissue and, with the camera model on, is averaged by it. `'scene_noise', false, 'sensor_noise', s` moves the noise from the scene to the sensor; with both off, the frames are noise-free.
+
 - **'ses'**: Number of sessions to be generated.
 - **'seed'**: Random number generator seed.
 - **'B'**: Baseline id for different baseline images.
