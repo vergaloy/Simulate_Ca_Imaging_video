@@ -21,6 +21,12 @@ function [pth_out,outpath,Mot,file_name, A, GT_motion_xy, GT_nonrigid] = Simulat
 % tissue; and
 % scene_noise = false, which leaves the per-frame noise out of the scene. Both
 % together move the noise from the scene to the sensor.
+%
+% Also optional: impacts (impacts, impact_*; make_impacts), where the animal
+% knocks the microscope and the view is lost for about a second: the tissue's
+% structure slides away with motion blur and blends into the structure of a
+% different field of view (another baseline image) over the baseline's fixed
+% low-pass part, then comes back. They take the camera path.
 
 % Example usages:
 % Simulate_Ca_video('across_session_nonrigid',0,'Nneu',100,'ses',2,'CA1_A',true,'PNR',1);
@@ -130,9 +136,17 @@ end
 % Regimes, local bends, jumps and the camera model (see the header). The path
 % below is taken only when one of them is on.
 rp = regime_options(opt);
+ip = impact_options(opt);
+use_impacts = ip.n > 0 || ~isempty(ip.onset);
 use_camera = opt.camera_supersample > 1 || ~isempty(rp.rigid_frames) || ...
-    rp.local_bends > 0 || rp.jumps > 0;
+    rp.local_bends > 0 || rp.jumps > 0 || use_impacts;
 GT_regimes = cell(1, opt.ses);
+GT_impacts = cell(1, opt.ses);
+if use_impacts
+    % The foreign field of view: the high-pass part of another baseline image,
+    % on the saved frame and on BL's grey scale. Loading it draws nothing.
+    Hf0 = foreign_structure(opt, [d1, d2]);
+end
 
 for i = progress(1:opt.ses)
     std_i = motion_std(i);
@@ -194,6 +208,19 @@ for i = progress(1:opt.ses)
         cam_i = camera_setup([d1, d2], R_i.camera_supersample, mo);
         GT_regimes{i} = R_i;
         moves = moves || ~isempty(R_i.bumps) || ~isempty(R_i.jumps);
+        if use_impacts
+            % From a stream of their own (seed + 5000 + session).
+            if isempty(opt.within_session_motion_seed)
+                i_seed = opt.seed + 5000 + i;
+            else
+                i_seed = opt.within_session_motion_seed + 5000 + i - 1;
+            end
+            I_i = make_impacts(F, ip, i_seed);
+            GT_impacts{i} = I_i;
+            moves = moves || any(I_i.mask);
+            % The baseline's low-pass part, fixed to the optics (BL's scale).
+            LB0 = imgaussfilt(double(mult * BL(:, :, i)), opt.impact_cutoff);
+        end
     end
 
     % Session output setup
@@ -249,6 +276,7 @@ for i = progress(1:opt.ses)
             (1 - mult) * V_batch * (1 / (1 / PNR + 1)) + ...
             (1 - mult) * N_batch * (1 - 1 / (1 / PNR + 1));
         if opt.scene_noise
+            scale_a = 2^8 / double(range(FV_batch, 'all'));   % v2uint8's factor
             FV_batch = v2uint8(FV_batch);
         else
             % The same scene without its per-frame noise: the noise is still
@@ -260,6 +288,7 @@ for i = progress(1:opt.ses)
                 (1 - mult) * V_batch * (1 / (1 / PNR + 1)) + ...
                 (1 - mult) * mean(N_batch, 'all') * (1 - 1 / (1 / PNR + 1));
             FV_batch = uint8((double(FV_batch) - lo) / rg * 2^8);
+            scale_a = 2^8 / rg;
         end
 
         if isempty(cam_i)
@@ -281,6 +310,14 @@ for i = progress(1:opt.ses)
             % All of it at once, through the camera model, with the sensor
             % noise added before the camera rounds each frame (see
             % apply_camera_motion for why the order matters).
+            if use_impacts && any(I_i.mask(batch_frames))
+                % The fixed and the foreign parts on this batch's grey scale
+                % (the scene maps BL to it by the factor scale_a).
+                cam_i.imp = struct('I', I_i, 'LB', scale_a * LB0, ...
+                    'Hf_s', cam_i.My * (scale_a * mult * Hf0) * cam_i.Mx.');
+            else
+                cam_i.imp = [];
+            end
             FV_batch = apply_camera_motion(FV_batch, batch_frames, cam_i, ...
                 opt.sensor_noise, rs_noise);
         end
@@ -345,7 +382,7 @@ end
 
 if saveMat
     % Save simulation metadata (everything else)
-    save([file_name '_meta.mat'], 'A_GT', 'A', 'C', 'S', 'BL', 'opt', 'Mot', 'LFP', 'GT_motion_xy', 'GT_nonrigid', 'GT_regimes', 'placement', 'region_info', 'C_slow', 'Cb', 'Cb_slow', '-v7.3');
+    save([file_name '_meta.mat'], 'A_GT', 'A', 'C', 'S', 'BL', 'opt', 'Mot', 'LFP', 'GT_motion_xy', 'GT_nonrigid', 'GT_regimes', 'GT_impacts', 'placement', 'region_info', 'C_slow', 'Cb', 'Cb_slow', '-v7.3');
 end
 
 if ~(saveVideos || saveMat || saveGT)
@@ -601,6 +638,38 @@ addParameter(inp, 'camera_supersample', 1, valid_v)
 %   false with 'sensor_noise', s moves the noise from the scene to the sensor.
 addParameter(inp, 'sensor_noise', 0, valid_v)
 addParameter(inp, 'scene_noise', true, valid_bool)
+% --- Impacts (optional, off) -----------------------------------------------
+% The animal knocks the microscope and the view is lost for about 1 s
+% (make_impacts). The baseline is split by a Gaussian of impact_cutoff px into
+% a low-pass part, fixed to the optics, and the rest of the scene (its
+% high-pass part, the neurons, the background sources), which slides away fast
+% with motion blur and blends into the high-pass part of another baseline
+% image (impact_baseline); at the peak only that foreign structure shows. Then
+% it reverses. Drawn from a stream of their own (seed + 5000 + session).
+% Ground truth in GT_impacts. Any impact switches to the camera path.
+% impacts: impacts per session at random onsets. 0 (default) = none.
+% impact_onset: their first frames instead ([] = random).
+% impact_duration: frames per impact (25, 1 s at the AVI writer's 25 fps).
+% impact_distance: [min max] slide distance in px, drawn uniformly per impact;
+%   the direction is uniform.
+% impact_slide_frames: frames the slide takes, out and back.
+% impact_blend_frames: frames the blend into the foreign structure takes, out
+%   and back.
+% impact_baseline: the baseline image (1-8, as 'B') the foreign structure comes
+%   from.
+% impact_cutoff: sigma in px of the Gaussian that splits low-pass from high-pass.
+% impact_blur_samples: sub-frame instants averaged per frame (motion blur).
+% impact_gap: frames kept clear between random impacts and from the ends.
+addParameter(inp, 'impacts', 0, valid_v)
+addParameter(inp, 'impact_onset', [], @(x) isempty(x) || isnumeric(x))
+addParameter(inp, 'impact_duration', 25, valid_v)
+addParameter(inp, 'impact_distance', [20 40], valid_v)
+addParameter(inp, 'impact_slide_frames', 4, valid_v)
+addParameter(inp, 'impact_blend_frames', 8, valid_v)
+addParameter(inp, 'impact_baseline', 6, valid_v)
+addParameter(inp, 'impact_cutoff', 8, valid_v)
+addParameter(inp, 'impact_blur_samples', 16, valid_v)
+addParameter(inp, 'impact_gap', 50, valid_v)
 addParameter(inp, 'ses', 2, valid_v)           % Number of sessions to be generated
 addParameter(inp, 'seed', 'shuffle')           % Random number generator seed ('shuffle' for a new seed each run)
 addParameter(inp, 'B', '1')                    % Baseline id (1-8). Different valeus used different baseline images
@@ -807,6 +876,27 @@ p = struct();
 for k = 1:numel(names)
     p.(names{k}) = opt.(['within_session_' names{k}]);
 end
+end
+
+function p = impact_options(opt)
+% The impact_* options make_impacts reads, without the prefix.
+p = struct('n', opt.impacts, 'onset', opt.impact_onset, ...
+    'duration', opt.impact_duration, 'distance', opt.impact_distance, ...
+    'slide_frames', opt.impact_slide_frames, 'blend_frames', opt.impact_blend_frames, ...
+    'blur_samples', opt.impact_blur_samples, 'gap', opt.impact_gap);
+end
+
+function Hf = foreign_structure(opt, saved_size)
+% The high-pass part of baseline image opt.impact_baseline, made as the
+% scene's own baseline is (create_baseline, the 20 px Add_NRmotion crops,
+% v2uint8), on its grey scale. The global random state is left untouched.
+prev = rng;
+o = opt; o.B = opt.impact_baseline; o.ses = 1;
+bl = create_baseline(o);
+rng(prev);
+bl = bl(21:20 + saved_size(1), 21:20 + saved_size(2), 1);
+bl = double(v2uint8(bl));
+Hf = bl - imgaussfilt(bl, opt.impact_cutoff);
 end
 
 function reject_renamed_options(args)

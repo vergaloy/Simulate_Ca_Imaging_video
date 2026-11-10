@@ -26,20 +26,70 @@ function out = apply_camera_motion(FV, frames, cam, sensor_noise, rs)
 %            draw per frame (randn(rs, Ly, Lx)) in frame order. 0 = none.
 %   rs     - the RandStream it is drawn from
 %
+% Frames inside an impact (cam.imp, set by Simulate_Ca_video when impacts are
+% on) are built by impact_frame below; every other frame as above.
+%
 % Author: Pablo Vergara
 
 [Ly, Lx, n] = size(FV);
 s = cam.s;
 out = zeros(Ly, Lx, n, 'uint8');
 noisy = nargin > 3 && sensor_noise > 0;
+has_imp = isfield(cam, 'imp') && ~isempty(cam.imp);
 for k = 1:n
-    scene = cam.My * double(FV(:, :, k)) * cam.Mx.';
     [fx, fy] = within_session_field(cam.mo, frames(k), cam.xs, cam.ys, cam.B);
-    fine = interp2(scene, cam.Xf - s*fx, cam.Yf - s*fy, 'linear', 0);
+    if has_imp && cam.imp.I.index(frames(k)) > 0
+        fine = impact_frame(double(FV(:, :, k)), frames(k), cam, fx, fy);
+    else
+        scene = cam.My * double(FV(:, :, k)) * cam.Mx.';
+        fine = interp2(scene, cam.Xf - s*fx, cam.Yf - s*fy, 'linear', 0);
+    end
     binned = squeeze(mean(mean(reshape(fine, s, Ly, s, Lx), 1), 3));
     if noisy
         binned = binned + sensor_noise * randn(rs, Ly, Lx);
     end
     out(:, :, k) = uint8(binned);
+end
+end
+
+function fine = impact_frame(F, t, cam, fx, fy)
+%% One frame inside an impact (make_impacts), on the camera's fine grid.
+%
+% The frame is split into a part fixed to the optics, the baseline's low-pass
+% part plus the frame's mean brightness (cam.imp.LB, in the frame's grey
+% scale), and the moving rest: the baseline's high-pass part, the neurons and
+% the background sources, zero-mean. At each sub-frame instant the rest is
+% moved by the tissue's field plus the impact's slide and weighted by w, and
+% the foreign structure (cam.imp.Hf_s, already on the fine grid) is moved by
+% its own offset and weighted by 1 - w; the instants are averaged (motion
+% blur). Outside the frame both moving parts are 0, so only the fixed part
+% shows there.
+s = cam.s; I = cam.imp.I;
+fixed = cam.imp.LB + (mean(F, 'all') - mean(cam.imp.LB, 'all'));
+fine = cam.My * fixed * cam.Mx.';
+nb = size(I.sub_w, 1);
+w = I.sub_w(:, t);
+% Real scene: one interpolation per distinct position, its weights summed.
+if any(w > 0)
+    rest = cam.My * (F - fixed) * cam.Mx.';
+    [pos, ~, g] = unique([I.sub_x(:, t), I.sub_y(:, t)], 'rows', 'stable');
+    for q = 1:size(pos, 1)
+        wq = sum(w(g == q)) / nb;
+        if wq > 0
+            fine = fine + wq * interp2(rest, cam.Xf - s*(fx + pos(q, 1)), ...
+                cam.Yf - s*(fy + pos(q, 2)), 'linear', 0);
+        end
+    end
+end
+% Foreign structure.
+if any(w < 1)
+    [pos, ~, g] = unique([I.sub_fx(:, t), I.sub_fy(:, t)], 'rows', 'stable');
+    for q = 1:size(pos, 1)
+        wq = sum(1 - w(g == q)) / nb;
+        if wq > 0
+            fine = fine + wq * interp2(cam.imp.Hf_s, cam.Xf - s*pos(q, 1), ...
+                cam.Yf - s*pos(q, 2), 'linear', 0);
+        end
+    end
 end
 end
