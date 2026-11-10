@@ -657,7 +657,8 @@ addParameter(inp, 'scene_noise', true, valid_bool)
 %   and back.
 % impact_baseline: the baseline image (1-8, as 'B') the foreign structure comes
 %   from.
-% impact_cutoff: sigma in px of the Gaussian that splits low-pass from high-pass.
+% impact_cutoff: sigma in px of the Gaussian that splits low-pass from high-pass
+%   (20: at 8 the broad vessels stay partly in the fixed low-pass part).
 % impact_blur_samples: sub-frame instants averaged per frame (motion blur).
 % impact_gap: frames kept clear between random impacts and from the ends.
 addParameter(inp, 'impacts', 0, valid_v)
@@ -667,7 +668,7 @@ addParameter(inp, 'impact_distance', [20 40], valid_v)
 addParameter(inp, 'impact_slide_frames', 4, valid_v)
 addParameter(inp, 'impact_blend_frames', 8, valid_v)
 addParameter(inp, 'impact_baseline', 6, valid_v)
-addParameter(inp, 'impact_cutoff', 8, valid_v)
+addParameter(inp, 'impact_cutoff', 20, valid_v)
 addParameter(inp, 'impact_blur_samples', 16, valid_v)
 addParameter(inp, 'impact_gap', 50, valid_v)
 addParameter(inp, 'ses', 2, valid_v)           % Number of sessions to be generated
