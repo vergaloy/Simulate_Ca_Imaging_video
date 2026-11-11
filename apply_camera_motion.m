@@ -40,7 +40,14 @@ function out = apply_camera_motion(FV, frames, cam, sensor_noise, rs)
 % and hot pixels (camera_optics_frame), and, with the sensor noise, the hot
 % pixels' own noise (after the sensor noise, from cam.op.rs_hot). With
 % cam.op.oof.save_file set, every frame's out-of-focus light is written there
-% (/L, [Ly Lx T] double), for the replay proof.
+% (/L, [Ly Lx T] double), for the replay proof. Its black level is part of the
+% sensor's offset; with cam.op.adc_gain g ~= 1 the read-out is digitised in
+% steps of g and multiplied by g (missing codes, make_camera_optics) before the
+% 8-bit rounding, in every frame, noisy or not; with cam.op.adc_subpixels n > 1
+% and the sensor noise on, each pixel is read by n x n sensor pixels, each with
+% noise n * sensor_noise (so their mean has sensor_noise) and its own ADC, and
+% averaged (n^2 noise draws per frame from rs; the hot pixels' noise is added
+% before). A noise-free frame reads the same through one ADC or n^2.
 %
 % Author: Pablo Vergara
 
@@ -53,6 +60,7 @@ has_drift = isfield(cam, 'drift') && ~isempty(cam.drift);
 has_jolt = isfield(cam, 'jolt') && ~isempty(cam.jolt);
 has_op = isfield(cam, 'op') && ~isempty(cam.op);
 has_oof = has_op && ~isempty(cam.op.oof);
+has_adc = has_op && isfield(cam.op, 'adc_gain') && cam.op.adc_gain ~= 1;
 save_oof = has_oof && ~isempty(cam.op.oof.save_file);
 for k = 1:n
     [fx, fy] = within_session_field(cam.mo, frames(k), cam.xs, cam.ys, cam.B);
@@ -81,15 +89,40 @@ for k = 1:n
     if has_op
         binned = camera_optics_frame(binned, frames(k), cam.op);
     end
-    if noisy
-        binned = binned + sensor_noise * randn(rs, Ly, Lx);
-        if has_op && ~isempty(cam.op.hot_idx)
+    if noisy && has_adc && cam.op.adc_subpixels > 1
+        % Read out by n x n sensor pixels (cam.op.adc_subpixels), each with
+        % noise n * sensor_noise and its own ADC, then averaged: the
+        % simulated pixel is a binned one, as the real recordings binned 2 x 2.
+        if ~isempty(cam.op.hot_idx)
             h = cam.op.hot_idx;
             binned(h) = binned(h) + cam.op.hot_std .* randn(cam.op.rs_hot, numel(h), 1);
+        end
+        nq = cam.op.adc_subpixels;
+        acc = zeros(Ly, Lx);
+        for q = 1:nq^2
+            acc = acc + adc_read(binned + nq * sensor_noise * randn(rs, Ly, Lx), cam.op);
+        end
+        binned = acc / nq^2;
+    else
+        if noisy
+            binned = binned + sensor_noise * randn(rs, Ly, Lx);
+            if has_op && ~isempty(cam.op.hot_idx)
+                h = cam.op.hot_idx;
+                binned(h) = binned(h) + cam.op.hot_std .* randn(cam.op.rs_hot, numel(h), 1);
+            end
+        end
+        if has_adc
+            binned = adc_read(binned, cam.op);
         end
     end
     out(:, :, k) = uint8(binned);
 end
+end
+
+function y = adc_read(x, op)
+%% The ADC's digital gain (make_camera_optics): digitised in steps of g, times g.
+g = op.adc_gain; c = op.adc_offset;
+y = g * round((x - c) / g) + c;
 end
 
 function fine = impact_frame(F, t, cam, fx, fy)

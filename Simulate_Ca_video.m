@@ -189,7 +189,8 @@ GT_drift = cell(1, opt.ses); GT_jolts = cell(1, opt.ses); GT_glitches = cell(1, 
 % The camera's optics and sensor (make_camera_optics), off by default.
 op_p = optics_options(opt);
 use_optics = op_p.hot_pixels || op_p.sensor_pattern || op_p.dust || ...
-    op_p.vignetting || op_p.oof_layer || op_p.flicker || op_p.brightness_trend;
+    op_p.vignetting || op_p.oof_layer || op_p.flicker || op_p.brightness_trend || ...
+    any(op_p.black_level(:) > 0) || any(op_p.adc_gain(:) ~= 1);
 use_camera = use_camera || use_optics;
 GT_optics = cell(1, opt.ses);
 
@@ -293,7 +294,7 @@ for i = progress(1:opt.ses)
             end
         end
         if use_optics
-            % From streams of their own (seed + 8100 .. 8600 + session).
+            % From streams of their own (seed + 8100 .. 8800 + session).
             op_s = op_p;
             if ~isempty(op_s.oof_layer_file) && opt.ses > 1
                 [fp, fn, fe] = fileparts(op_s.oof_layer_file);
@@ -884,7 +885,7 @@ addParameter(inp, 'camera_supersample', 1, valid_v)
 % gain texture and offsets (hot pixels, rows, columns, pixels), then the sensor
 % noise. Every switch is off by default; the ranges below are drawn once per
 % session (uniformly, sizes and the half-point log-uniformly) from streams of
-% their own (seed + 8100 .. 8600 + session), and a range [a a] fixes a value.
+% their own (seed + 8100 .. 8800 + session), and a range [a a] fixes a value.
 % Grey levels are those of the recorded frame. Ranges are wider than the S4
 % audit's measurements (PatchForge docs/lanes/s4-audit-m1-m4.md), which they
 % contain. Any switch takes the camera path.
@@ -964,6 +965,29 @@ addParameter(inp, 'flicker_map_scale', [30 150], valid_v)
 addParameter(inp, 'brightness_trend', false, valid_bool)
 addParameter(inp, 'trend_change', [-0.3 0.05], valid_v)
 addParameter(inp, 'trend_tau', [0.1 2], valid_v)
+% black_level: the sensor's pedestal, grey levels added to every pixel's offset
+%   before the noise and the rounding, so pixels with no light read it, stay
+%   noisy and do not clip at 0. A range [a b] is drawn per session (uniform,
+%   seed + 8700 + session). 0 (default) = none. The real control recordings
+%   (S24): darkest mean pixel 6-10 grey, nothing clipped at 0.
+addParameter(inp, 'black_level', 0, valid_v)
+% adc_gain: the camera's digital gain g on its ADC's integer codes (missing
+%   codes): the frame is round(g k + c), k = round((sensor + noise - c) / g),
+%   so one 8-bit code in g / (g - 1) is never used, and where the noise is low
+%   the smooth background's iso-grey contours every g / (g - 1) grey show as
+%   terraces: concentric rings, fixed to the camera, after background removal.
+%   Drawn per session (seed + 8800 + session): on with probability
+%   adc_gain_prob, g uniform in the adc_gain range, c uniform in [0 g). 1
+%   (default) = none. The real control recordings (S24): g 1.164 (one code in
+%   7 missing).
+%   adc_subpixels n: with the sensor noise on, each simulated pixel is read
+%   by n x n sensor pixels (noise n * sensor_noise each, digitised, averaged),
+%   as a recording binned n x n to the simulated pixel: the terraces are damped
+%   by the sensor pixel's noise. 1 (default) = the simulated pixel is read once.
+%   The real control recordings: n = 2 (S4: one simulated px ~ 2 x 2 sensor px).
+addParameter(inp, 'adc_gain', 1, valid_v)
+addParameter(inp, 'adc_gain_prob', 1, valid_v)
+addParameter(inp, 'adc_subpixels', 1, valid_v)
 % --- Sensor noise (optional, off) ------------------------------------------
 % sensor_noise: standard deviation, in grey levels, of white Gaussian noise
 %   added to every recorded frame after the motion, independent per pixel and
@@ -1321,7 +1345,8 @@ names = {'hot_pixels', 'hot_pixel_fraction', 'hot_pixel_offset', 'hot_pixel_spre
     'vignetting_shift', 'oof_layer', 'oof_shape', 'oof_halfpoint', 'oof_edge_factor', ...
     'oof_gain', 'oof_lag', 'oof_walk', 'oof_walk_smoothness', 'oof_walk_max', ...
     'oof_layer_file', 'flicker', 'flicker_rms', 'flicker_smoothness', 'flicker_maps', ...
-    'flicker_map_rms', 'flicker_map_scale', 'brightness_trend', 'trend_change', 'trend_tau'};
+    'flicker_map_rms', 'flicker_map_scale', 'brightness_trend', 'trend_change', 'trend_tau', ...
+    'black_level', 'adc_gain', 'adc_gain_prob', 'adc_subpixels'};
 p = struct('fov_inset', opt.camera_fov_inset);
 for k = 1:numel(names)
     p.(names{k}) = opt.(names{k});
