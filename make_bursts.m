@@ -172,6 +172,12 @@ for j = 1:n
         ev(end+1) = floor(tt); %#ok<AGROW>
         tt = tt + drng(p.interval, j);
     end
+    if isempty(ev)
+        % A drive shorter than the first interval (S25's short events)
+        % still discharges once, at its middle. No draw: settings whose
+        % drives always discharged are unchanged.
+        ev = t0(j) + floor(D(j) / 2);
+    end
     ev = ev(ev >= 1 & ev <= T);
     amp = zeros(N, 1);
     pop = zeros(1, T);
@@ -205,12 +211,19 @@ for j = 1:n
         pop = pop + c;
         Cj(i, :) = amp(i) * peakC(i) * c;
     end
-    pop = pop / max(pop);
-    % The burst's frames: from its onset until the population trace has
-    % decayed below p.tail of its peak; after that the burst adds nothing (a
-    % later burst takes over its frames).
-    [~, pk] = max(pop);
-    last = find(pop >= p.tail, 1, 'last');
+    if ~any(pop)
+        % Every recruited neuron's wave arrives after the movie: the burst
+        % has its frames but adds no light.
+        pk = t0(j);
+        last = t0(j) + D(j) - 1;
+    else
+        pop = pop / max(pop);
+        % The burst's frames: from its onset until the population trace has
+        % decayed below p.tail of its peak; after that the burst adds nothing
+        % (a later burst takes over its frames).
+        [~, pk] = max(pop);
+        last = find(pop >= p.tail, 1, 'last');
+    end
     pop(last+1:end) = 0;
     Cj(:, last+1:end) = 0;
     Bu.C_burst = Bu.C_burst + Cj;
