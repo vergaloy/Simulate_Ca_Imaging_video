@@ -29,6 +29,10 @@ function out = apply_camera_motion(FV, frames, cam, sensor_noise, rs)
 % Frames inside an impact (cam.imp, set by Simulate_Ca_video when impacts are
 % on) are built by impact_frame below; every other frame as above.
 %
+% Slow drift (cam.drift, make_slow_drift) is composed with the field of every
+% frame (compose_slow_drift); frames inside a jolt (cam.jolt, make_jolts) are
+% built by jolt_frame.
+%
 % Author: Pablo Vergara
 
 [Ly, Lx, n] = size(FV);
@@ -36,10 +40,17 @@ s = cam.s;
 out = zeros(Ly, Lx, n, 'uint8');
 noisy = nargin > 3 && sensor_noise > 0;
 has_imp = isfield(cam, 'imp') && ~isempty(cam.imp);
+has_drift = isfield(cam, 'drift') && ~isempty(cam.drift);
+has_jolt = isfield(cam, 'jolt') && ~isempty(cam.jolt);
 for k = 1:n
     [fx, fy] = within_session_field(cam.mo, frames(k), cam.xs, cam.ys, cam.B);
+    if has_drift
+        [fx, fy] = compose_slow_drift(cam.drift, frames(k), cam.Xp, cam.Yp, fx, fy);
+    end
     if has_imp && cam.imp.I.index(frames(k)) > 0
         fine = impact_frame(double(FV(:, :, k)), frames(k), cam, fx, fy);
+    elseif has_jolt && cam.jolt.J.index(frames(k)) > 0
+        fine = jolt_frame(double(FV(:, :, k)), frames(k), cam, fx, fy);
     else
         scene = cam.My * double(FV(:, :, k)) * cam.Mx.';
         fine = interp2(scene, cam.Xf - s*fx, cam.Yf - s*fy, 'linear', 0);

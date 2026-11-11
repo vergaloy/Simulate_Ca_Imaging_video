@@ -27,6 +27,13 @@ function [pth_out,outpath,Mot,file_name, A, GT_motion_xy, GT_nonrigid] = Simulat
 % structure slides away with motion blur and blends into the structure of a
 % different field of view (another baseline image) over the baseline's fixed
 % low-pass part, then comes back. They take the camera path.
+%
+% Also optional: slow drift (slow_drift*; make_slow_drift), a session-long
+% deformation set as a rate and composed with the rest of the motion; jolts
+% (jolt*; make_jolts), a fast displacement of the same scene with motion blur,
+% defocus and a brightness change; and acquisition glitches (glitch*;
+% make_glitches), dropped, white, black and partial frames. Drift and jolts
+% take the camera path.
 
 % Example usages:
 % Simulate_Ca_video('across_session_nonrigid',0,'Nneu',100,'ses',2,'CA1_A',true,'PNR',1);
@@ -147,6 +154,12 @@ if use_impacts
     % on the saved frame and on BL's grey scale. Loading it draws nothing.
     Hf0 = foreign_structure(opt, [d1, d2]);
 end
+% Slow drift, jolts and glitches (all optional, off; see the options).
+use_drift = logical(opt.slow_drift);
+use_jolts = opt.jolts > 0 || ~isempty(opt.jolt_onset);
+use_glitches = opt.glitches > 0;
+use_camera = use_camera || use_drift || use_jolts;
+GT_drift = cell(1, opt.ses); GT_jolts = cell(1, opt.ses); GT_glitches = cell(1, opt.ses);
 
 for i = progress(1:opt.ses)
     std_i = motion_std(i);
@@ -221,6 +234,24 @@ for i = progress(1:opt.ses)
             % The baseline's low-pass part, fixed to the optics (BL's scale).
             LB0 = imgaussfilt(double(mult * BL(:, :, i)), opt.impact_cutoff);
         end
+        if use_drift
+            Dr_i = make_slow_drift([d1, d2], F, slow_drift_options(opt), session_seed(opt, 9100, i));
+            cam_i.drift = Dr_i;
+            [cam_i.Xp, cam_i.Yp] = meshgrid(cam_i.xs, cam_i.ys);
+            GT_drift{i} = Dr_i;
+            moves = true;
+        end
+        if use_jolts
+            avoid = [];
+            if use_impacts, avoid = I_i.mask; end
+            J_i = make_jolts(F, jolt_options(opt), session_seed(opt, 9200, i), avoid);
+            GT_jolts{i} = J_i;
+            moves = moves || any(J_i.mask);
+            LBj0 = [];      % the baseline's low-pass part, fixed during jolts
+            if opt.jolt_cutoff > 0
+                LBj0 = imgaussfilt(double(mult * BL(:, :, i)), opt.jolt_cutoff);
+            end
+        end
     end
 
     % Session output setup
@@ -255,6 +286,12 @@ for i = progress(1:opt.ses)
     rs_noise = [];
     if opt.sensor_noise > 0
         rs_noise = RandStream('mt19937ar', 'Seed', opt.seed + 4000 + i);
+    end
+    G_i = [];
+    if use_glitches
+        G_i = make_glitches([d1, d2], F, glitch_options(opt), session_seed(opt, 9300, i));
+        GT_glitches{i} = G_i;
+        glitch_prev = [];
     end
 
     for start_idx = progress(1:batch_sz:F)
@@ -318,6 +355,11 @@ for i = progress(1:opt.ses)
             else
                 cam_i.imp = [];
             end
+            if use_jolts && any(J_i.mask(batch_frames))
+                cam_i.jolt = struct('J', J_i, 'LB', scale_a * LBj0);
+            else
+                cam_i.jolt = [];
+            end
             FV_batch = apply_camera_motion(FV_batch, batch_frames, cam_i, ...
                 opt.sensor_noise, rs_noise);
         end
@@ -331,6 +373,11 @@ for i = progress(1:opt.ses)
                 FV_batch(:, :, k) = uint8(double(FV_batch(:, :, k)) + ...
                     opt.sensor_noise * randn(rs_noise, d1, d2));
             end
+        end
+
+        % Acquisition glitches, on the frames as recorded.
+        if ~isempty(G_i)
+            [FV_batch, glitch_prev] = apply_glitches(FV_batch, batch_frames, G_i, glitch_prev);
         end
 
         % --- Save session output video ---
@@ -383,6 +430,9 @@ end
 if saveMat
     % Save simulation metadata (everything else)
     save([file_name '_meta.mat'], 'A_GT', 'A', 'C', 'S', 'BL', 'opt', 'Mot', 'LFP', 'GT_motion_xy', 'GT_nonrigid', 'GT_regimes', 'GT_impacts', 'placement', 'region_info', 'C_slow', 'Cb', 'Cb_slow', '-v7.3');
+end
+if saveMat && (use_drift || use_jolts || use_glitches)
+    save([file_name '_meta.mat'], 'GT_drift', 'GT_jolts', 'GT_glitches', '-append');
 end
 
 if ~(saveVideos || saveMat || saveGT)
@@ -615,6 +665,102 @@ addParameter(inp, 'within_session_jump_held', 0.5, valid_v)
 addParameter(inp, 'within_session_jump_decay', [10 40], valid_v)
 addParameter(inp, 'within_session_jump_bound', 15, valid_v)
 addParameter(inp, 'within_session_jump_gap', 100, valid_v)
+% --- Slow drift (optional, off) ----------------------------------------------
+% A session-long deformation that builds up at a rate (make_slow_drift): mostly
+% rigid, with a small affine part (scale, rotation, shear) and small broad
+% bends, slow in time, with a net displacement that does not average to zero.
+% It is composed with the rest of the within-session motion (compose_slow_drift),
+% not added. From a stream of its own (seed + 9100 + session). Ground truth in
+% GT_drift. Takes the camera path. Each rate is drawn per session from
+% [min max]; the ranges hold what was measured on real one-photon sessions,
+% with room on both sides.
+% slow_drift: true turns it on. false (default) = none.
+% slow_drift_minutes: minutes of the drift's clock the movie spans. [] = the
+%   movie's own length at 25 frames per second.
+% slow_drift_rate: [min max] rigid speed, px/min, log-uniform.
+% slow_drift_wander: [min max] how fast the headings wander, rad/sqrt(min).
+% slow_drift_scale: [min max] %/min; slow_drift_rotation: [min max] deg/min;
+%   slow_drift_shear: [min max] %/min; all log-uniform.
+% slow_drift_bends: number of broad bends.
+% slow_drift_bend_width: [min max] their Gaussian sigma, px, log-uniform.
+% slow_drift_bend_rate: [min max] px/min, log-uniform.
+% slow_drift_knot: minutes between the headings' knots.
+addParameter(inp, 'slow_drift', false, valid_bool)
+addParameter(inp, 'slow_drift_minutes', [], @(x) isempty(x) || (isnumeric(x) && isscalar(x) && x > 0))
+addParameter(inp, 'slow_drift_rate', [0.02 0.5], valid_v)
+addParameter(inp, 'slow_drift_wander', [0.2 0.8], valid_v)
+addParameter(inp, 'slow_drift_scale', [0.005 0.15], valid_v)
+addParameter(inp, 'slow_drift_rotation', [0.002 0.04], valid_v)
+addParameter(inp, 'slow_drift_shear', [0.005 0.08], valid_v)
+addParameter(inp, 'slow_drift_bends', 2, valid_v)
+addParameter(inp, 'slow_drift_bend_width', [50 150], valid_v)
+addParameter(inp, 'slow_drift_bend_rate', [0.005 0.08], valid_v)
+addParameter(inp, 'slow_drift_knot', 0.5, valid_v)
+% --- Jolts: impacts that keep the scene (optional, off) -----------------------
+% A fast displacement of the SAME scene, as when the animal knocks the scope
+% (make_jolts, jolt_frame): a few px, a fast rise, a slower return, with motion
+% blur, a little defocus and a small brightness change; the baseline's
+% low-pass part stays fixed to the optics. Beside the impacts below, whose view
+% is lost to a foreign field of view (the rare stress case). From a stream of
+% their own (seed + 9200 + session), kept jolt_gap frames away from the impacts.
+% Ground truth in GT_jolts. Any jolt switches to the camera path.
+% jolts: jolts per session at random onsets. 0 (default) = none.
+% jolt_onset: their first frames instead ([] = random).
+% jolt_size: [min max] peak displacement, px, uniform; the direction uniform.
+% jolt_rise: [min max] frames to the peak.
+% jolt_return: [min max] frames back.
+% jolt_defocus: [min max] Gaussian sigma of the defocus at the peak, px.
+% jolt_brightness: [min max] brightness change at the peak, a fraction; the
+%   sign is random.
+% jolt_cutoff: sigma in px of the Gaussian that splits the fixed low-pass part
+%   off the baseline (as impact_cutoff). 0 = no split, the whole frame moves.
+% jolt_blur_step: px between the sub-frame instants of the motion blur.
+% jolt_blur_max: at most this many instants per frame.
+% jolt_gap: frames kept clear between jolts, impacts and the ends.
+addParameter(inp, 'jolts', 0, valid_v)
+addParameter(inp, 'jolt_onset', [], @(x) isempty(x) || isnumeric(x))
+addParameter(inp, 'jolt_size', [1 8], valid_v)
+addParameter(inp, 'jolt_rise', [1 6], valid_v)
+addParameter(inp, 'jolt_return', [8 100], valid_v)
+addParameter(inp, 'jolt_defocus', [0.5 2.5], valid_v)
+addParameter(inp, 'jolt_brightness', [0.02 0.2], valid_v)
+addParameter(inp, 'jolt_cutoff', 20, valid_v)
+addParameter(inp, 'jolt_blur_step', 0.25, valid_v)
+addParameter(inp, 'jolt_blur_max', 32, valid_v)
+addParameter(inp, 'jolt_gap', 50, valid_v)
+% --- Acquisition glitches (optional, off) ---------------------------------------
+% Dropped, white (saturated), black and partial frames, in short runs after
+% which the next frame is normal (make_glitches, apply_glitches). Applied to
+% the frames as recorded, after the motion, the camera and the sensor noise.
+% From a stream of their own (seed + 9300 + session). Ground truth in
+% GT_glitches.
+% glitches: runs per 1000 frames. 0 (default) = none.
+% glitch_run: [min max] frames per run.
+% glitch_kinds: weights of dropped, white, black, partial.
+% glitch_mixed: share of runs that draw a kind for every frame.
+% glitch_white_gain: [min max] gain of a white frame, log-uniform;
+%   glitch_white_offset: [min max] grey levels added to it.
+% glitch_black_residual: largest gain left in a black frame;
+%   glitch_black_level: [min max] its grey level.
+% glitch_partial_band: [min max] share of the frame's height a partial frame
+%   spoils; glitch_partial_cap: chance it is a cap from the top or the bottom
+%   edge rather than a band; glitch_partial_white: chance the rows are white.
+% glitch_inset: rows at each edge left out of that share (e.g. a margin that
+%   will be cropped).
+% glitch_gap: normal frames at least between two runs.
+addParameter(inp, 'glitches', 0, valid_v)
+addParameter(inp, 'glitch_run', [1 5], valid_v)
+addParameter(inp, 'glitch_kinds', [1 1 1 1], valid_v)
+addParameter(inp, 'glitch_mixed', 0.25, valid_v)
+addParameter(inp, 'glitch_white_gain', [1.1 6], valid_v)
+addParameter(inp, 'glitch_white_offset', [0 80], valid_v)
+addParameter(inp, 'glitch_black_residual', 0.03, valid_v)
+addParameter(inp, 'glitch_black_level', [0 3], valid_v)
+addParameter(inp, 'glitch_partial_band', [0.1 0.7], valid_v)
+addParameter(inp, 'glitch_partial_cap', 0.6, valid_v)
+addParameter(inp, 'glitch_partial_white', 0.8, valid_v)
+addParameter(inp, 'glitch_inset', 0, valid_v)
+addParameter(inp, 'glitch_gap', 2, valid_v)
 % --- Camera model (optional, off) ------------------------------------------
 % camera_supersample: s > 1 records every frame as a camera would: each pixel
 %   averages a band-limited version of the scene at s x s points, after the
@@ -898,6 +1044,43 @@ rng(prev);
 bl = bl(21:20 + saved_size(1), 21:20 + saved_size(2), 1);
 bl = double(v2uint8(bl));
 Hf = bl - imgaussfilt(bl, opt.impact_cutoff);
+end
+
+function p = slow_drift_options(opt)
+% The slow_drift_* options make_slow_drift reads, without the prefix.
+names = {'minutes', 'rate', 'wander', 'scale', 'rotation', 'shear', 'bends', ...
+    'bend_width', 'bend_rate', 'knot'};
+p = struct();
+for k = 1:numel(names)
+    p.(names{k}) = opt.(['slow_drift_' names{k}]);
+end
+end
+
+function p = jolt_options(opt)
+% The jolt_* options make_jolts reads, without the prefix.
+p = struct('n', opt.jolts, 'onset', opt.jolt_onset, 'size', opt.jolt_size, ...
+    'rise', opt.jolt_rise, 'return_frames', opt.jolt_return, ...
+    'defocus', opt.jolt_defocus, 'brightness', opt.jolt_brightness, ...
+    'blur_step', opt.jolt_blur_step, 'blur_max', opt.jolt_blur_max, 'gap', opt.jolt_gap);
+end
+
+function p = glitch_options(opt)
+% The glitch_* options make_glitches reads, without the prefix.
+names = {'run', 'kinds', 'mixed', 'white_gain', 'white_offset', 'black_residual', ...
+    'black_level', 'partial_band', 'partial_cap', 'partial_white', 'inset', 'gap'};
+p = struct('rate', opt.glitches);
+for k = 1:numel(names)
+    p.(names{k}) = opt.(['glitch_' names{k}]);
+end
+end
+
+function s = session_seed(opt, offset, i)
+% The seed of a per-session stream, as the motion streams above take theirs.
+if isempty(opt.within_session_motion_seed)
+    s = opt.seed + offset + i;
+else
+    s = opt.within_session_motion_seed + offset + i - 1;
+end
 end
 
 function reject_renamed_options(args)
