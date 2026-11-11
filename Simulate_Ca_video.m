@@ -27,6 +27,14 @@ function [pth_out,outpath,Mot,file_name, A, GT_motion_xy, GT_nonrigid] = Simulat
 % structure slides away with motion blur and blends into the structure of a
 % different field of view (another baseline image) over the baseline's fixed
 % low-pass part, then comes back. They take the camera path.
+%
+% Also optional: a smooth background (smooth_background), where the scene (the
+% baseline, the neurons, the background sources) stays in floating point all
+% the way to the camera instead of being rounded to 8 bits first, which gives
+% every smooth contour of the scene flat terraces; and activity bursts
+% (bursts, burst_*; make_bursts), periods of strong synchronised activity
+% (epileptic-like) where many neurons fire together for seconds and the
+% background rises with them, with no motion.
 
 % Example usages:
 % Simulate_Ca_video('across_session_nonrigid',0,'Nneu',100,'ses',2,'CA1_A',true,'PNR',1);
@@ -64,6 +72,13 @@ else
     [Cb, Cb_slow] = add_slow_baseline(Cb, opt, opt.slow_bg_amp, 2500);
 end
 
+% Activity bursts (make_bursts), from a stream of their own per session
+% (seed + 11000 + session). They are kept apart from C, which with Cb sets the
+% movie's grey scale, and added to the image on that same scale, so the frames
+% outside bursts are what they would be without them. The neurons' whole
+% activity is C + C_burst.
+[use_bursts, GT_bursts, C_burst] = session_bursts(C, placement, opt);
+
 % Apply synthetic non-rigid misalignment to neuron components for each session
 [BL(:,:,1), A{1,1}, bA{1,1}, Mot{1}] = Add_NRmotion(bl(:,:,1), A_GT{1}, bA_GT{1}, ...
     0, opt.plotme, opt.across_session_translation, opt.across_session_nonrigid_scale);
@@ -71,7 +86,11 @@ for i = 2:opt.ses
     [BL(:,:,i), A{1,i}, bA{1,i}, Mot{i}] = Add_NRmotion(bl(:,:,i), A_GT{i}, bA_GT{i}, ...
         opt.across_session_nonrigid, opt.plotme, opt.across_session_translation, opt.across_session_nonrigid_scale);
 end
-BL = v2uint8(BL);  % convert baseline to uint8
+if opt.smooth_background
+    BL = to_grey(BL);  % the same grey scale, not rounded
+else
+    BL = v2uint8(BL);  % convert baseline to uint8
+end
 
 [d1, d2] = size(BL(:,:,1));  % get spatial dimensions
 
@@ -262,14 +281,27 @@ for i = progress(1:opt.ses)
         global_idx = session_frames(batch_frames);
 
         % --- Generate simulated session data in batches ---
-        V_batch = v2uint8(reshape(reshape(A{i}, d1*d2, []) * C(:, global_idx), d1, d2, []) + ...
-            reshape(reshape(bA{i}, d1*d2, []) * Cb(:, global_idx), d1, d2, []));
+        X_batch = reshape(reshape(A{i}, d1*d2, []) * C(:, global_idx), d1, d2, []) + ...
+            reshape(reshape(bA{i}, d1*d2, []) * Cb(:, global_idx), d1, d2, []);
+        if opt.smooth_background
+            V_batch = to_grey(X_batch);
+        else
+            V_batch = v2uint8(X_batch);
+        end
+        if use_bursts
+            scale_v = 2^8 / double(range(X_batch, 'all'));   % v2uint8's factor
+        end
+        clear X_batch
 
         % Add smoothed noise
         N_batch = rand(d1, d2, numel(batch_frames), 'single');
         N_batch = imgaussfilt(N_batch);
         N_batch = N_batch - mean(N_batch, 3);
-        N_batch = v2uint8(N_batch);
+        if opt.smooth_background
+            N_batch = to_grey(N_batch);
+        else
+            N_batch = v2uint8(N_batch);
+        end
 
         % Combine neural signal, noise, and baseline
         FV_batch = mult * BL(:, :, i) + ...
@@ -277,7 +309,11 @@ for i = progress(1:opt.ses)
             (1 - mult) * N_batch * (1 - 1 / (1 / PNR + 1));
         if opt.scene_noise
             scale_a = 2^8 / double(range(FV_batch, 'all'));   % v2uint8's factor
-            FV_batch = v2uint8(FV_batch);
+            if opt.smooth_background
+                FV_batch = to_grey(FV_batch);
+            else
+                FV_batch = v2uint8(FV_batch);
+            end
         else
             % The same scene without its per-frame noise: the noise is still
             % drawn (the stream advances as always) but replaced by its mean,
@@ -287,8 +323,21 @@ for i = progress(1:opt.ses)
             FV_batch = mult * BL(:, :, i) + ...
                 (1 - mult) * V_batch * (1 / (1 / PNR + 1)) + ...
                 (1 - mult) * mean(N_batch, 'all') * (1 - 1 / (1 / PNR + 1));
-            FV_batch = uint8((double(FV_batch) - lo) / rg * 2^8);
+            if opt.smooth_background
+                FV_batch = (double(FV_batch) - lo) / rg * 2^8;
+            else
+                FV_batch = uint8((double(FV_batch) - lo) / rg * 2^8);
+            end
             scale_a = 2^8 / rg;
+        end
+
+        % Activity bursts, on this batch's grey scale: the neurons' and the
+        % background's part of the scene is (1 - mult) * V_batch / (1/PNR + 1),
+        % with V_batch = scale_v * (A C + bA Cb) less an offset.
+        if use_bursts
+            gain = scale_a * (1 - mult) * (1 / (1 / PNR + 1)) * scale_v;
+            [FV_batch, GT_bursts{i}] = add_burst_image(FV_batch, GT_bursts{i}, ...
+                A{i}, C_burst(:, global_idx), gain, batch_frames, opt.burst_glow_sigma);
         end
 
         if isempty(cam_i)
@@ -333,6 +382,13 @@ for i = progress(1:opt.ses)
             end
         end
 
+        % A smooth scene that nothing has rounded yet (no camera, no warp, no
+        % sensor noise) is the still scene itself, written in floating point
+        % (h5) or rounded (AVI); anything else is whole grey levels.
+        if ~isa(FV_batch, 'uint8') && (opt.save_avi || opt.sensor_noise > 0)
+            FV_batch = uint8(FV_batch);
+        end
+
         % --- Save session output video ---
         if saveVideos
             if opt.save_avi
@@ -346,8 +402,14 @@ for i = progress(1:opt.ses)
 
         % --- Ground truth generation ---
         if saveGT
-            V_GT_batch = v2uint8(reshape(reshape(tA, d1*d2, []) * C(:, global_idx), d1, d2, []) + ...
-                reshape(reshape(tbA, d1*d2, []) * Cb(:, global_idx), d1, d2, []));
+            if use_bursts
+                % The neurons' whole activity, bursts included.
+                V_GT_batch = v2uint8(reshape(reshape(tA, d1*d2, []) * (C(:, global_idx) + C_burst(:, global_idx)), d1, d2, []) + ...
+                    reshape(reshape(tbA, d1*d2, []) * Cb(:, global_idx), d1, d2, []));
+            else
+                V_GT_batch = v2uint8(reshape(reshape(tA, d1*d2, []) * C(:, global_idx), d1, d2, []) + ...
+                    reshape(reshape(tbA, d1*d2, []) * Cb(:, global_idx), d1, d2, []));
+            end
             matGT.GT(:, :, global_idx) = V_GT_batch;  % memory-safe write
         end
 
@@ -383,6 +445,9 @@ end
 if saveMat
     % Save simulation metadata (everything else)
     save([file_name '_meta.mat'], 'A_GT', 'A', 'C', 'S', 'BL', 'opt', 'Mot', 'LFP', 'GT_motion_xy', 'GT_nonrigid', 'GT_regimes', 'GT_impacts', 'placement', 'region_info', 'C_slow', 'Cb', 'Cb_slow', '-v7.3');
+    if use_bursts
+        save([file_name '_meta.mat'], 'GT_bursts', 'C_burst', '-append');
+    end
 end
 
 if ~(saveVideos || saveMat || saveGT)
@@ -685,6 +750,66 @@ addParameter(inp, 'slow_fraction', 1, valid_v) % Fraction of neurons that carry 
 addParameter(inp, 'background', 'independent', @(x) any(strcmp(x, {'independent', 'per_cell'}))) % 'independent': n_background sources with their own traces; 'per_cell': one blurred copy of each cell, driven by it (the old behaviour)
 addParameter(inp, 'n_background', 50, valid_v) % Number of independent background sources
 addParameter(inp, 'slow_bg_amp', 0, valid_v)   % Slow cyclic baseline of the background sources, as slow_amp is for the neurons (0 = none)
+% --- Smooth background (optional, off) -------------------------------------
+% smooth_background: true keeps the scene (the baseline, the neurons, the
+%   background sources, the scene noise) in floating point, on the grey scale
+%   it always had, until the camera (or the warp, or the sensor noise) rounds
+%   each frame once. false (default) = as always: the baseline is rounded to
+%   8 bits before anything else, so every smooth contour of the scene is a
+%   staircase of flat terraces that moves with the tissue. A still frame that
+%   nothing rounds (no motion, no camera, no sensor noise) is written as it is,
+%   in double (h5; AVI rounds it).
+addParameter(inp, 'smooth_background', false, valid_bool)
+% --- Activity bursts (optional, off) ---------------------------------------
+% Periods of strong, synchronised, epileptic-like activity (make_bursts): many
+% neurons fire together in rhythmic discharges for seconds, over the whole
+% field or a patch of it, at once or as a wave spreading from a centre, and the
+% diffuse background rises with them (a glow: the in-focus burst image
+% blurred, the out-of-focus cells that burst too). The image changes, with no
+% motion. Drawn from a stream of their own (seed + 11000 + session); added on
+% the movie's own grey scale, so the frames outside bursts are what they would
+% be without them (a very strong burst saturates at 255). Ground truth in
+% GT_bursts and C_burst. Every [min max] option may have one row per burst
+% instead (in time order), to give each burst its own range; Inf in a range
+% means Inf.
+% bursts: bursts per session at random onsets. 0 (default) = none.
+% burst_onset: their first frames instead ([] = random).
+% burst_duration: [min max] frames the population is driven, drawn per burst
+%   (the calcium then decays for a few dozen frames more).
+% burst_gap: frames kept clear between random bursts and from the ends.
+% burst_ramp: frames the drive takes to rise and to fall.
+% burst_fraction: [min max] probability that a neuron at the burst's centre is
+%   recruited, drawn per burst.
+% burst_radius: [min max] px, drawn per burst: recruitment falls off as
+%   exp(-d^2 / (2 radius^2)) with the distance d from the burst's centre
+%   (uniform in the frame). Inf (default) = the whole field alike.
+% burst_speed: [min max] px per frame, drawn per burst: each neuron fires
+%   d / speed frames after the population (a wave from the centre). Inf
+%   (default) = all at once.
+% burst_amplitude: [min max] peak of a recruited neuron's burst trace, in units
+%   of its own largest transient in the session; drawn per neuron and burst.
+% burst_neuropil: [min max] the glow's total light over the in-focus burst
+%   image's, drawn per burst. 0 = no glow.
+% burst_glow_sigma: px, the Gaussian blur of the glow.
+% burst_interval: [min max] frames between the population's discharges.
+% burst_join: [min max] probability that a recruited neuron joins a discharge
+%   at full drive, drawn per neuron and burst.
+% burst_tail: a burst ends where its population trace has decayed below this
+%   fraction of its peak; it adds nothing after.
+addParameter(inp, 'bursts', 0, valid_v)
+addParameter(inp, 'burst_onset', [], @(x) isempty(x) || isnumeric(x))
+addParameter(inp, 'burst_duration', [25 100], valid_v)
+addParameter(inp, 'burst_gap', 50, valid_v)
+addParameter(inp, 'burst_ramp', 5, valid_v)
+addParameter(inp, 'burst_fraction', [0.4 0.8], valid_v)
+addParameter(inp, 'burst_radius', [Inf Inf], valid_v)
+addParameter(inp, 'burst_speed', [Inf Inf], valid_v)
+addParameter(inp, 'burst_amplitude', [1 2], valid_v)
+addParameter(inp, 'burst_neuropil', [1 2], valid_v)
+addParameter(inp, 'burst_glow_sigma', 20, valid_v)
+addParameter(inp, 'burst_interval', [2 6], valid_v)
+addParameter(inp, 'burst_join', [0.5 1], valid_v)
+addParameter(inp, 'burst_tail', 0.005, valid_v)
 addParameter(inp, 'LFP', 0, valid_v)           % Flag to simulate Local Field Potentials (LFP) data (0 or 1)
 addParameter(inp, 'sf', 10, valid_v)           % Scaling factor used in the simulation process
 addParameter(inp, 'plotme', 0, valid_v)        % Flag to generate plots during simulation (0 or 1)
@@ -816,6 +941,77 @@ C_slow = cast(amp .* (1 - cos(2*pi*t ./ period + phase)) / 2, 'like', C);
 C = C + C_slow;
 end
 
+function out = to_grey(in)
+% v2uint8 without the rounding: the same grey scale, in double.
+in = double(in);
+out = (in - min(in, [], 'all')) ./ range(in, 'all') * 2^8;
+end
+
+function [use, GT_bursts, C_burst] = session_bursts(C, placement, opt)
+% Activity bursts for every session (make_bursts), or none.
+use = opt.bursts > 0 || ~isempty(opt.burst_onset);
+GT_bursts = cell(1, opt.ses);
+C_burst = [];
+if ~use
+    return
+end
+% The simulator's kinetics, as create_neuron_data scales them to sf.
+rise = opt.invtRise; rise(1) = log(exp(rise(1)) / opt.sf);
+decay = opt.invtDecay; decay(1) = log(exp(decay(1)) / opt.sf);
+p = struct('n', opt.bursts, 'onset', opt.burst_onset, 'duration', opt.burst_duration, ...
+    'gap', opt.burst_gap, 'ramp', opt.burst_ramp, 'fraction', opt.burst_fraction, ...
+    'radius', opt.burst_radius, 'speed', opt.burst_speed, ...
+    'amplitude', opt.burst_amplitude, 'neuropil', opt.burst_neuropil, ...
+    'interval', opt.burst_interval, 'join', opt.burst_join, 'tail', opt.burst_tail, ...
+    'rise', rise, 'decay', decay);
+xy = [placement.X_saved(:), placement.Y_saved(:)];
+saved_size = opt.d - 40;                 % Add_NRmotion crops 20 px per side
+C_burst = zeros(size(C));
+F = opt.F;
+for i = 1:opt.ses
+    cols = (i-1)*F+1:i*F;
+    Bu = make_bursts(C(:, cols), xy, saved_size, p, opt.seed + 11000 + i);
+    C_burst(:, cols) = Bu.C_burst;
+    Bu = rmfield(Bu, 'C_burst');
+    % Filled in frame by frame as the image is made (add_burst_image).
+    Bu.added_mean = zeros(1, F);     % mean grey level the bursts add, saved frame
+    Bu.added_max = zeros(1, F);      % largest grey level they add
+    Bu.peak_image = [];              % [d1 d2 n] what they add at each peak frame
+    GT_bursts{i} = Bu;
+end
+end
+
+function [FV, Bu] = add_burst_image(FV, Bu, A, Cn, gain, frames, glow_sigma)
+% Add the bursts' image to the frames FV (on their grey scale, uint8 or
+% double): the in-focus part, gain * A Cn, plus its glow, the same blurred by
+% a Gaussian of glow_sigma px and scaled by the burst's glow ratio (total
+% light over the in-focus part's). Record what was added (Bu.added_*,
+% Bu.peak_image). Only the frames with burst activity are touched.
+[d1, d2, ~] = size(FV);
+on = find(any(Cn, 1));
+if isempty(Bu.peak_image)
+    Bu.peak_image = zeros(d1, d2, size(Bu.table, 1), 'single');
+end
+for k = on
+    t = frames(k);
+    add = gain * reshape(reshape(A, d1*d2, []) * Cn(:, k), d1, d2);
+    if Bu.glow_ratio(t) > 0
+        add = add + Bu.glow_ratio(t) * imgaussfilt(add, glow_sigma, 'Padding', 0);
+    end
+    if isa(FV, 'uint8')
+        FV(:, :, k) = uint8(double(FV(:, :, k)) + add);
+    else
+        FV(:, :, k) = FV(:, :, k) + add;
+    end
+    Bu.added_mean(t) = mean(add, 'all');
+    Bu.added_max(t) = max(add, [], 'all');
+    j = find(Bu.table(:, 6) == t);
+    if ~isempty(j)
+        Bu.peak_image(:, :, j) = single(add);
+    end
+end
+end
+
 function C=add_remapping_drifting(C,opt)
 Nneu2=opt.Nneu2;
 ses=opt.ses;
@@ -896,7 +1092,11 @@ o = opt; o.B = opt.impact_baseline; o.ses = 1;
 bl = create_baseline(o);
 rng(prev);
 bl = bl(21:20 + saved_size(1), 21:20 + saved_size(2), 1);
-bl = double(v2uint8(bl));
+if opt.smooth_background
+    bl = to_grey(bl);
+else
+    bl = double(v2uint8(bl));
+end
 Hf = bl - imgaussfilt(bl, opt.impact_cutoff);
 end
 
