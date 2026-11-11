@@ -411,8 +411,12 @@ for i = progress(1:opt.ses)
         % with V_batch = scale_v * (A C + bA Cb) less an offset.
         if use_bursts
             gain = scale_a * (1 - mult) * (1 / (1 / PNR + 1)) * scale_v;
+            glow = struct('sigma', opt.burst_glow_sigma, 'source', opt.burst_glow_source, 'diffuse', []);
+            if strcmp(glow.source, 'background')
+                glow.diffuse = imgaussfilt(double(mean(FV_batch, 3)), 4);
+            end
             [FV_batch, GT_bursts{i}] = add_burst_image(FV_batch, GT_bursts{i}, ...
-                A{i}, C_burst(:, global_idx), gain, batch_frames, opt.burst_glow_sigma);
+                A{i}, C_burst(:, global_idx), gain, batch_frames, glow);
         end
 
         if isempty(cam_i)
@@ -1066,12 +1070,33 @@ addParameter(inp, 'smooth_background', false, valid_bool)
 %   of its own largest transient in the session; drawn per neuron and burst.
 % burst_neuropil: [min max] the glow's total light over the in-focus burst
 %   image's, drawn per burst. 0 = no glow.
-% burst_glow_sigma: px, the Gaussian blur of the glow.
+% burst_glow_sigma: px, the Gaussian blur of the glow ('blur'), or how far it
+%   spreads beyond the recruited cells ('background').
 % burst_interval: [min max] frames between the population's discharges.
 % burst_join: [min max] probability that a recruited neuron joins a discharge
 %   at full drive, drawn per neuron and burst.
 % burst_tail: a burst ends where its population trace has decayed below this
 %   fraction of its peak; it adds nothing after.
+% burst_rate: [min max] events per minute, drawn per session (S25, the sharp
+%   brightness peaks of real recordings); the session's number of bursts is
+%   then a Poisson draw (instead of bursts). [] (default) = use bursts.
+% burst_fps: frames per second, to turn burst_rate into a count (20, the real
+%   recordings').
+% burst_glow_source: 'blur' (default) = the glow is the in-focus burst image
+%   blurred (above); 'background' = the glow is the scene's own diffuse light
+%   (the batch's mean frame blurred by 4 px: neuropil and out-of-focus light,
+%   vessels dark, no single cells), times the burst's footprint (a Gaussian
+%   around its centre of radius hypot(burst_radius, burst_glow_sigma): the
+%   glow spreads beyond the recruited cells; Inf = the whole field), moving
+%   with the tissue: a burst then raises mostly the neuropil.
+% burst_neuropil_dff: [min max] per burst, with 'background': the glow's rise
+%   at the burst's peak relative to that diffuse light (following the
+%   population trace), drawn log-uniformly; [] (default) = the glow's total
+%   light is burst_neuropil times the in-focus light's, as with 'blur'.
+% burst_decay: [min max] frames, the decay time constant of each recruited
+%   neuron's burst calcium, drawn uniformly per neuron (the real peaks decay
+%   faster than the simulator's typical transient); [] (default) = the
+%   simulator's own decay distribution (invtDecay).
 addParameter(inp, 'bursts', 0, valid_v)
 addParameter(inp, 'burst_onset', [], @(x) isempty(x) || isnumeric(x))
 addParameter(inp, 'burst_duration', [25 100], valid_v)
@@ -1086,6 +1111,11 @@ addParameter(inp, 'burst_glow_sigma', 20, valid_v)
 addParameter(inp, 'burst_interval', [2 6], valid_v)
 addParameter(inp, 'burst_join', [0.5 1], valid_v)
 addParameter(inp, 'burst_tail', 0.005, valid_v)
+addParameter(inp, 'burst_rate', [], @(x) isempty(x) || isnumeric(x))
+addParameter(inp, 'burst_fps', 20, valid_v)
+addParameter(inp, 'burst_glow_source', 'blur', @(x) any(strcmp(x, {'blur', 'background'})))
+addParameter(inp, 'burst_neuropil_dff', [], @(x) isempty(x) || isnumeric(x))
+addParameter(inp, 'burst_decay', [], @(x) isempty(x) || isnumeric(x))
 addParameter(inp, 'LFP', 0, valid_v)           % Flag to simulate Local Field Potentials (LFP) data (0 or 1)
 addParameter(inp, 'sf', 10, valid_v)           % Scaling factor used in the simulation process
 addParameter(inp, 'plotme', 0, valid_v)        % Flag to generate plots during simulation (0 or 1)
@@ -1225,7 +1255,7 @@ end
 
 function [use, GT_bursts, C_burst] = session_bursts(C, placement, opt)
 % Activity bursts for every session (make_bursts), or none.
-use = opt.bursts > 0 || ~isempty(opt.burst_onset);
+use = opt.bursts > 0 || ~isempty(opt.burst_onset) || any(opt.burst_rate(:) > 0);
 GT_bursts = cell(1, opt.ses);
 C_burst = [];
 if ~use
@@ -1239,7 +1269,8 @@ p = struct('n', opt.bursts, 'onset', opt.burst_onset, 'duration', opt.burst_dura
     'radius', opt.burst_radius, 'speed', opt.burst_speed, ...
     'amplitude', opt.burst_amplitude, 'neuropil', opt.burst_neuropil, ...
     'interval', opt.burst_interval, 'join', opt.burst_join, 'tail', opt.burst_tail, ...
-    'rise', rise, 'decay', decay);
+    'rise', rise, 'decay', decay, 'rate', opt.burst_rate, 'fps', opt.burst_fps, ...
+    'dff', opt.burst_neuropil_dff, 'decay_frames', opt.burst_decay);
 xy = [placement.X_saved(:), placement.Y_saved(:)];
 saved_size = opt.d - 40;                 % Add_NRmotion crops 20 px per side
 C_burst = zeros(size(C));
@@ -1257,22 +1288,48 @@ for i = 1:opt.ses
 end
 end
 
-function [FV, Bu] = add_burst_image(FV, Bu, A, Cn, gain, frames, glow_sigma)
+function [FV, Bu] = add_burst_image(FV, Bu, A, Cn, gain, frames, glow)
 % Add the bursts' image to the frames FV (on their grey scale, uint8 or
-% double): the in-focus part, gain * A Cn, plus its glow, the same blurred by
-% a Gaussian of glow_sigma px and scaled by the burst's glow ratio (total
-% light over the in-focus part's). Record what was added (Bu.added_*,
-% Bu.peak_image). Only the frames with burst activity are touched.
+% double): the in-focus part, gain * A Cn, plus its glow. glow.source 'blur':
+% the in-focus part blurred by a Gaussian of glow.sigma px and scaled by the
+% burst's glow ratio (total light over the in-focus part's). 'background':
+% the scene's diffuse light (glow.diffuse) times the burst's footprint,
+% scaled either to the burst's neuropil rise times its population trace
+% (Bu.neuropil_dff) or to the glow ratio times the in-focus light. Record
+% what was added (Bu.added_*, Bu.added_glow_mean, Bu.peak_image). Only the
+% frames with burst activity are touched.
 [d1, d2, ~] = size(FV);
 on = find(any(Cn, 1));
 if isempty(Bu.peak_image)
     Bu.peak_image = zeros(d1, d2, size(Bu.table, 1), 'single');
 end
+bg = strcmp(glow.source, 'background');
+if bg
+    [X, Y] = meshgrid(1:d2, 1:d1);
+    if ~isfield(Bu, 'added_glow_mean')
+        Bu.added_glow_mean = zeros(size(Bu.added_mean));
+    end
+end
 for k = on
     t = frames(k);
     add = gain * reshape(reshape(A, d1*d2, []) * Cn(:, k), d1, d2);
-    if Bu.glow_ratio(t) > 0
-        add = add + Bu.glow_ratio(t) * imgaussfilt(add, glow_sigma, 'Padding', 0);
+    j = Bu.index(t);
+    if bg && j > 0
+        R = hypot(Bu.table(j, 9), glow.sigma);     % the glow spreads beyond the cells
+        if isinf(R)
+            W = glow.diffuse;
+        else
+            W = glow.diffuse .* exp(-((X - Bu.table(j, 7)).^2 + (Y - Bu.table(j, 8)).^2) / (2 * R^2));
+        end
+        if ~isempty(Bu.neuropil_dff)
+            g = Bu.neuropil_dff(j) * Bu.level(t) * W;
+        else
+            g = Bu.glow_ratio(t) * sum(add, 'all') * W / sum(W, 'all');
+        end
+        Bu.added_glow_mean(t) = mean(g, 'all');
+        add = add + g;
+    elseif ~bg && Bu.glow_ratio(t) > 0
+        add = add + Bu.glow_ratio(t) * imgaussfilt(add, glow.sigma, 'Padding', 0);
     end
     if isa(FV, 'uint8')
         FV(:, :, k) = uint8(double(FV(:, :, k)) + add);

@@ -31,6 +31,19 @@ function Bu = make_bursts(C, xy, frame_size, p, seed)
 % Every [min max] option may instead have one row per burst (in time order),
 % to give each burst its own range.
 %
+% Population events at a rate (S25: the sharp brightness peaks of real
+% recordings): with p.rate set, the number of bursts in the session is drawn
+% from a Poisson distribution with mean rate * T / (60 * fps), the rate itself
+% drawn per session from p.rate (events per minute; [0 x] includes sessions
+% with none). The rest is drawn as for any burst; short drives (a frame or a
+% few) give one or a few discharges.
+%
+% Neuropil (S25, Pablo's M8 review): with p.dff set, each burst also draws the
+% rise of the diffuse background (neuropil and out-of-focus light) at its peak,
+% relative to the scene's local brightness (Bu.neuropil_dff); Simulate_Ca_video
+% then adds that glow, shaped by the scene's own background, instead of the
+% blurred in-focus image (burst_glow_source 'background').
+%
 % Everything is drawn from a stream of its own, so the rest of the simulation
 % is the same with or without bursts.
 %
@@ -47,7 +60,15 @@ function Bu = make_bursts(C, xy, frame_size, p, seed)
 %                between discharges); tail (the burst ends where its
 %                population trace falls below this fraction of its peak, and
 %                adds nothing after); rise, decay (the simulator's lognormal
-%                parameters of 1/rise and 1/decay, as create_neuron_data uses)
+%                parameters of 1/rise and 1/decay, as create_neuron_data uses);
+%                optional: rate ([min max] events per minute, drawn per session;
+%                used when onset is empty; [] = n), fps (frames per second, to
+%                turn the rate into a count), dff ([min max] neuropil rise at
+%                the burst's peak, drawn per burst, log-uniformly (uniformly if
+%                the range starts at 0); [] = none),
+%                decay_frames ([min max] decay time constant of each recruited
+%                neuron's burst calcium, frames, drawn per neuron uniformly;
+%                [] = the simulator's own decay distribution)
 %   seed       - seed of the stream
 %
 % Output, struct Bu:
@@ -67,6 +88,8 @@ function Bu = make_bursts(C, xy, frame_size, p, seed)
 %   glow_ratio [1 T] the burst's glow ratio on its frames, 0 elsewhere: the
 %              glow's total light over the in-focus burst image's
 %   C_burst    [N T] activity added to the neurons
+%   rate       events per minute drawn for the session (NaN without p.rate)
+%   neuropil_dff [1 n] the neuropil rise drawn per burst ([] without p.dff)
 %
 % Author: Pablo Vergara
 
@@ -83,12 +106,22 @@ Bu.mask = false(1, T);
 Bu.level = zeros(1, T);
 Bu.glow_ratio = zeros(1, T);
 Bu.C_burst = zeros(N, T);
+Bu.rate = NaN;
+Bu.neuropil_dff = [];
+use_rate = isfield(p, 'rate') && ~isempty(p.rate);
+use_dff = isfield(p, 'dff') && ~isempty(p.dff);
+use_tau = isfield(p, 'decay_frames') && ~isempty(p.decay_frames);
 
 rs = RandStream('mt19937ar', 'Seed', seed);
 % A [min max] range (or burst j's row of it), drawn uniformly. Inf stays Inf.
 drng = @(r, j) draw(rs, r(min(j, size(r, 1)), :));
 if isempty(p.onset)
-    n = round(p.n);
+    if use_rate
+        Bu.rate = drng(p.rate, 1);
+        n = poisson_rs(rs, Bu.rate * T / (60 * p.fps));
+    else
+        n = round(p.n);
+    end
     if n == 0
         return
     end
@@ -154,7 +187,11 @@ for j = 1:n
         ti = ev(joined) + round(delay(i));
         s(ti(ti <= T)) = 1;
         rise = 1 / lognrnd_rs(rs, p.rise(1), p.rise(2));
-        decay = 1 / lognrnd_rs(rs, p.decay(1), p.decay(2));
+        if use_tau
+            decay = drng(p.decay_frames, j);         % measured decay (S25)
+        else
+            decay = 1 / lognrnd_rs(rs, p.decay(1), p.decay(2));
+        end
         % The two draws overlap now and then; the slower one is the decay,
         % so the kernel stays positive (rise = decay would make it zero).
         [rise, decay] = deal(min(rise, decay), max(max(rise, decay), 1.01 * min(rise, decay)));
@@ -184,6 +221,14 @@ for j = 1:n
     Bu.recruited(:, j) = rec;
     Bu.amp(:, j) = amp .* rec;
     Bu.delay(:, j) = delay .* rec;
+    if use_dff
+        r = p.dff(min(j, size(p.dff, 1)), :);       % log-uniform: amplitudes are skewed
+        if r(1) > 0
+            Bu.neuropil_dff(j) = exp(log(r(1)) + rand(rs) * (log(r(end)) - log(r(1))));
+        else
+            Bu.neuropil_dff(j) = r(1) + rand(rs) * (r(end) - r(1));
+        end
+    end
 end
 Bu.mask = Bu.index > 0;
 end
@@ -194,6 +239,16 @@ if any(isinf(r))
     x = Inf;
 else
     x = r(1) + rand(rs) * (r(end) - r(1));
+end
+end
+
+function n = poisson_rs(rs, lambda)
+% A Poisson draw from a given stream (Knuth's product of uniforms; lambda is
+% small here, a few dozen at most).
+L = exp(-lambda); n = 0; q = rand(rs);
+while q > L
+    n = n + 1;
+    q = q * rand(rs);
 end
 end
 
