@@ -45,9 +45,10 @@ function out = apply_camera_motion(FV, frames, cam, sensor_noise, rs)
 % steps of g and multiplied by g (missing codes, make_camera_optics) before the
 % 8-bit rounding, in every frame, noisy or not; with cam.op.adc_subpixels n > 1
 % and the sensor noise on, each pixel is read by n x n sensor pixels, each with
-% noise n * sensor_noise (so their mean has sensor_noise) and its own ADC, and
-% averaged (n^2 noise draws per frame from rs; the hot pixels' noise is added
-% before). A noise-free frame reads the same through one ADC or n^2.
+% noise n * sensor_noise (so their mean has sensor_noise), its own ADC and its
+% own 8-bit code, and the codes averaged (n^2 noise draws per frame from rs;
+% the hot pixels' noise is added before). A noise-free frame reads the same
+% through one ADC or n^2.
 %
 % Author: Pablo Vergara
 
@@ -91,7 +92,8 @@ for k = 1:n
     end
     if noisy && has_adc && cam.op.adc_subpixels > 1
         % Read out by n x n sensor pixels (cam.op.adc_subpixels), each with
-        % noise n * sensor_noise and its own ADC, then averaged: the
+        % noise n * sensor_noise and its own ADC, written as an 8-bit code
+        % (the rounding that skips the missing codes), then averaged: the
         % simulated pixel is a binned one, as the real recordings binned 2 x 2.
         if ~isempty(cam.op.hot_idx)
             h = cam.op.hot_idx;
@@ -100,7 +102,7 @@ for k = 1:n
         nq = cam.op.adc_subpixels;
         acc = zeros(Ly, Lx);
         for q = 1:nq^2
-            acc = acc + adc_read(binned + nq * sensor_noise * randn(rs, Ly, Lx), cam.op);
+            acc = acc + double(uint8(adc_read(binned + nq * sensor_noise * randn(rs, Ly, Lx), cam.op)));
         end
         binned = acc / nq^2;
     else

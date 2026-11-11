@@ -981,7 +981,8 @@ addParameter(inp, 'black_level', 0, valid_v)
 %   (default) = none. The real control recordings (S24): g 1.164 (one code in
 %   7 missing).
 %   adc_subpixels n: with the sensor noise on, each simulated pixel is read
-%   by n x n sensor pixels (noise n * sensor_noise each, digitised, averaged),
+%   by n x n sensor pixels (noise n * sensor_noise each, digitised to 8-bit
+%   codes, the codes averaged),
 %   as a recording binned n x n to the simulated pixel: the terraces are damped
 %   by the sensor pixel's noise. 1 (default) = the simulated pixel is read once.
 %   The real control recordings: n = 2 (S4: one simulated px ~ 2 x 2 sensor px).

@@ -63,9 +63,11 @@ function op = make_camera_optics(frame_size, T, p, seed)
 %                   exp(-2 pi^2 s^2 (g - 1)^2 / g^2), s the noise std at the
 %                   ADC). With adc_subpixels n > 1 each simulated pixel is
 %                   read by n x n sensor pixels (noise n times the pixel's,
-%                   each digitised, then averaged), as a recording binned
-%                   n x n: the terraces are then damped by the sensor
-%                   pixel's noise, as in the real chain.
+%                   each digitised to its 8-bit code, the codes averaged), as
+%                   a recording binned n x n: the terraces are then damped
+%                   by the sensor pixel's noise, as in the real chain. The
+%                   fixed pattern (prnu, dsnu, rows, columns) dithers them
+%                   too: at the real level it is 0.4-1 grey per pixel.
 %
 % Inputs:
 %   frame_size - [d1 d2], the saved frame the camera records
