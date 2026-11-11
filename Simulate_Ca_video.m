@@ -16,6 +16,13 @@ function [pth_out,outpath,Mot,file_name, A, GT_motion_xy, GT_nonrigid] = Simulat
 % motion is composed into one field per frame and applied once
 % (apply_camera_motion); with all of them off nothing changes, bit for bit.
 %
+% Also optional, all off by default: what the camera adds that does not move
+% with the tissue (make_camera_optics; options in the "Camera optics and
+% sensor" block): hot pixels, the sensor's fixed pattern and dust (path M3),
+% vignetting from a real recording and an out-of-focus layer with a motion of
+% its own (path M4), and brightness flicker and slow trends (path M6). Any of
+% them takes the camera path; their ground truth is in GT_optics.
+%
 % Also optional: sensor noise (sensor_noise), white noise added to each frame
 % after the motion, before the camera rounds it, so it does not move with the
 % tissue; and
@@ -147,6 +154,12 @@ if use_impacts
     % on the saved frame and on BL's grey scale. Loading it draws nothing.
     Hf0 = foreign_structure(opt, [d1, d2]);
 end
+% The camera's optics and sensor (make_camera_optics), off by default.
+op_p = optics_options(opt);
+use_optics = op_p.hot_pixels || op_p.sensor_pattern || op_p.dust || ...
+    op_p.vignetting || op_p.oof_layer || op_p.flicker || op_p.brightness_trend;
+use_camera = use_camera || use_optics;
+GT_optics = cell(1, opt.ses);
 
 for i = progress(1:opt.ses)
     std_i = motion_std(i);
@@ -220,6 +233,23 @@ for i = progress(1:opt.ses)
             moves = moves || any(I_i.mask);
             % The baseline's low-pass part, fixed to the optics (BL's scale).
             LB0 = imgaussfilt(double(mult * BL(:, :, i)), opt.impact_cutoff);
+        end
+        if use_optics
+            % From streams of their own (seed + 8100 .. 8600 + session).
+            op_s = op_p;
+            if ~isempty(op_s.oof_layer_file) && opt.ses > 1
+                [fp, fn, fe] = fileparts(op_s.oof_layer_file);
+                op_s.oof_layer_file = fullfile(fp, sprintf('%s_ses%02d%s', fn, i - 1, fe));
+            end
+            op_i = make_camera_optics([d1, d2], F, op_s, opt.seed + i);
+            if ~isempty(op_i.oof) && ~isempty(op_i.oof.save_file)
+                if isfile(op_i.oof.save_file), delete(op_i.oof.save_file); end
+                h5create(op_i.oof.save_file, '/L', [d1 d2 F], 'Datatype', 'double', ...
+                    'ChunkSize', [d1 d2 1]);
+            end
+            cam_i.op = op_i;
+            GT_optics{i} = rmfield(op_i, 'rs_hot');
+            moves = moves || ~isempty(op_i.oof);
         end
     end
 
@@ -383,6 +413,10 @@ end
 if saveMat
     % Save simulation metadata (everything else)
     save([file_name '_meta.mat'], 'A_GT', 'A', 'C', 'S', 'BL', 'opt', 'Mot', 'LFP', 'GT_motion_xy', 'GT_nonrigid', 'GT_regimes', 'GT_impacts', 'placement', 'region_info', 'C_slow', 'Cb', 'Cb_slow', '-v7.3');
+end
+
+if saveMat && use_optics
+    save([file_name '_meta.mat'], 'GT_optics', '-append');
 end
 
 if ~(saveVideos || saveMat || saveGT)
@@ -623,6 +657,92 @@ addParameter(inp, 'within_session_jump_gap', 100, valid_v)
 %   about 0.1 px toward whole pixels; this does not. Odd s keeps the middle
 %   sample on the pixel centre. 1 (default) = off.
 addParameter(inp, 'camera_supersample', 1, valid_v)
+% --- Camera optics and sensor (optional, off; make_camera_optics) ----------
+% Fixed to the camera, applied after the motion: the light is multiplied by
+% the vignetting, the dust and the brightness gain, then the sensor applies its
+% gain texture and offsets (hot pixels, rows, columns, pixels), then the sensor
+% noise. Every switch is off by default; the ranges below are drawn once per
+% session (uniformly, sizes and the half-point log-uniformly) from streams of
+% their own (seed + 8100 .. 8600 + session), and a range [a a] fixes a value.
+% Grey levels are those of the recorded frame. Ranges are wider than the S4
+% audit's measurements (PatchForge docs/lanes/s4-audit-m1-m4.md), which they
+% contain. Any switch takes the camera path.
+% camera_fov_inset: px on every side of the saved frame that are cropped off
+%   later (the vignetting is fitted to the rest, and dust lands in it).
+addParameter(inp, 'camera_fov_inset', 0, valid_v)
+% hot_pixels: isolated pixels with an offset, keeping signal and noise.
+%   hot_pixel_fraction [min max] of the pixels (log-uniform); offsets lognormal
+%   with median hot_pixel_offset (grey levels) and log-sigma hot_pixel_spread;
+%   with the sensor noise on, each has a noise of its own, std sqrt(c * offset),
+%   c drawn from hot_pixel_noise.
+addParameter(inp, 'hot_pixels', false, valid_bool)
+addParameter(inp, 'hot_pixel_fraction', [2e-4 5e-3], valid_v)
+addParameter(inp, 'hot_pixel_offset', [5 40], valid_v)
+addParameter(inp, 'hot_pixel_spread', [0.4 1.1], valid_v)
+addParameter(inp, 'hot_pixel_noise', [0 1], valid_v)
+% sensor_pattern: the fixed pattern; stds of the per-pixel gain (fraction,
+%   PRNU), the per-pixel offset (grey levels, DSNU), the row and column offsets.
+addParameter(inp, 'sensor_pattern', false, valid_bool)
+addParameter(inp, 'sensor_prnu', [0.005 0.04], valid_v)
+addParameter(inp, 'sensor_dsnu', [0 1.5], valid_v)
+addParameter(inp, 'sensor_row_offset', [0.1 1.5], valid_v)
+addParameter(inp, 'sensor_col_offset', [0.1 1.5], valid_v)
+% dust: static, multiplicative. dust_specks [min max] sharp dark specks (dust
+%   on the sensor or filter), FWHM dust_size px, elongated up to 2:1, contrast
+%   dust_contrast; dust_blurry [min max] faint soft disks (dust on a lens),
+%   diameter dust_blurry_size px, contrast dust_blurry_contrast.
+addParameter(inp, 'dust', false, valid_bool)
+addParameter(inp, 'dust_specks', [0 6], valid_v)
+addParameter(inp, 'dust_size', [2 8], valid_v)
+addParameter(inp, 'dust_contrast', [0.05 0.5], valid_v)
+addParameter(inp, 'dust_blurry', [0 3], valid_v)
+addParameter(inp, 'dust_blurry_size', [20 120], valid_v)
+addParameter(inp, 'dust_blurry_contrast', [0.02 0.15], valid_v)
+% vignetting: multiplicative, from vignetting_file (variable V, peak 1; the
+%   default was extracted from a real recording, see the file's 'source'),
+%   scaled to cover the field of view; per session raised to a power drawn
+%   from vignetting_strength, flipped up/down and left/right at random if
+%   vignetting_flip, and moved by a fraction of the frame width drawn from
+%   vignetting_shift in a random direction.
+addParameter(inp, 'vignetting', false, valid_bool)
+addParameter(inp, 'vignetting_file', 'vignetting_167-4.mat', @(x) ischar(x) || isstring(x))
+addParameter(inp, 'vignetting_strength', [0.5 2], valid_v)
+addParameter(inp, 'vignetting_flip', true, valid_bool)
+addParameter(inp, 'vignetting_shift', [0 0.15], valid_v)
+% oof_layer: out-of-focus light with a motion of its own (camera_layer_frame).
+%   The split: a low-pass of shape oof_shape (one drawn per session from
+%   'gaussian', 'dog', 'opening'), half-point oof_halfpoint px (Gaussian-sigma
+%   equivalent, log-uniform), blur growing toward the corners by
+%   oof_edge_factor. The motion: oof_gain times the tissue's field oof_lag
+%   frames earlier, plus an AR(1) walk of std oof_walk px (smoothness
+%   oof_walk_smoothness, capped at oof_walk_max). oof_layer_file: write every
+%   frame's out-of-focus light there (h5, /L), for a replay proof.
+addParameter(inp, 'oof_layer', false, valid_bool)
+addParameter(inp, 'oof_shape', {'gaussian', 'dog', 'opening'}, @(x) ischar(x) || iscellstr(x) || isstring(x))
+addParameter(inp, 'oof_halfpoint', [6 64], valid_v)
+addParameter(inp, 'oof_edge_factor', [1 2], valid_v)
+addParameter(inp, 'oof_gain', [0.5 1.2], valid_v)
+addParameter(inp, 'oof_lag', [0 5], valid_v)
+addParameter(inp, 'oof_walk', [0 2], valid_v)
+addParameter(inp, 'oof_walk_smoothness', 0.99, valid_v)
+addParameter(inp, 'oof_walk_max', 6, valid_v)
+addParameter(inp, 'oof_layer_file', '', @(x) ischar(x) || isstring(x))
+% flicker: a uniform gain 1 + g(t), g an AR(1) series of RMS flicker_rms and
+%   smoothness flicker_smoothness, times 1 + sum of flicker_maps smooth maps
+%   (Gaussian-filtered noise of scale flicker_map_scale px), each with its own
+%   AR(1) series, together of RMS flicker_map_rms.
+% brightness_trend: a slow exponential change of the gain, by trend_change at
+%   the last frame (negative = dimmer, bleaching-like), time constant
+%   trend_tau times the session's length.
+addParameter(inp, 'flicker', false, valid_bool)
+addParameter(inp, 'flicker_rms', [0.005 0.08], valid_v)
+addParameter(inp, 'flicker_smoothness', [0 0.99], valid_v)
+addParameter(inp, 'flicker_maps', 3, valid_v)
+addParameter(inp, 'flicker_map_rms', [0 0.05], valid_v)
+addParameter(inp, 'flicker_map_scale', [30 150], valid_v)
+addParameter(inp, 'brightness_trend', false, valid_bool)
+addParameter(inp, 'trend_change', [-0.3 0.05], valid_v)
+addParameter(inp, 'trend_tau', [0.1 2], valid_v)
 % --- Sensor noise (optional, off) ------------------------------------------
 % sensor_noise: standard deviation, in grey levels, of white Gaussian noise
 %   added to every recorded frame after the motion, independent per pixel and
@@ -837,6 +957,29 @@ if opt.drift==1
     M=double(repelem(M,1,F));
     C=C.*M;
 end
+end
+
+function p = optics_options(opt)
+% The options make_camera_optics reads (camera_fov_inset as fov_inset).
+names = {'hot_pixels', 'hot_pixel_fraction', 'hot_pixel_offset', 'hot_pixel_spread', ...
+    'hot_pixel_noise', 'sensor_pattern', 'sensor_prnu', 'sensor_dsnu', ...
+    'sensor_row_offset', 'sensor_col_offset', 'dust', 'dust_specks', 'dust_size', ...
+    'dust_contrast', 'dust_blurry', 'dust_blurry_size', 'dust_blurry_contrast', ...
+    'vignetting', 'vignetting_file', 'vignetting_strength', 'vignetting_flip', ...
+    'vignetting_shift', 'oof_layer', 'oof_shape', 'oof_halfpoint', 'oof_edge_factor', ...
+    'oof_gain', 'oof_lag', 'oof_walk', 'oof_walk_smoothness', 'oof_walk_max', ...
+    'oof_layer_file', 'flicker', 'flicker_rms', 'flicker_smoothness', 'flicker_maps', ...
+    'flicker_map_rms', 'flicker_map_scale', 'brightness_trend', 'trend_change', 'trend_tau'};
+p = struct('fov_inset', opt.camera_fov_inset);
+for k = 1:numel(names)
+    p.(names{k}) = opt.(names{k});
+end
+for k = {'hot_pixels', 'sensor_pattern', 'dust', 'vignetting', 'oof_layer', ...
+        'flicker', 'brightness_trend', 'vignetting_flip'}
+    p.(k{1}) = logical(p.(k{1}));
+end
+p.vignetting_file = char(p.vignetting_file);
+p.oof_layer_file = char(p.oof_layer_file);
 end
 
 function [dx,dy] = make_xy_motion_ar(T, phi, std_px, max_px, seed)

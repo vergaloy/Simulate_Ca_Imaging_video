@@ -29,6 +29,15 @@ function out = apply_camera_motion(FV, frames, cam, sensor_noise, rs)
 % Frames inside an impact (cam.imp, set by Simulate_Ca_video when impacts are
 % on) are built by impact_frame below; every other frame as above.
 %
+% With cam.op (make_camera_optics, set by Simulate_Ca_video when any optics
+% option is on), what the camera adds that does not move with the tissue:
+% an out-of-focus layer that moves on its own (camera_layer_frame; not inside
+% impacts), then vignetting, dust, brightness and the sensor's fixed pattern
+% and hot pixels (camera_optics_frame), and, with the sensor noise, the hot
+% pixels' own noise (after the sensor noise, from cam.op.rs_hot). With
+% cam.op.oof.save_file set, every frame's out-of-focus light is written there
+% (/L, [Ly Lx T] double), for the replay proof.
+%
 % Author: Pablo Vergara
 
 [Ly, Lx, n] = size(FV);
@@ -36,17 +45,34 @@ s = cam.s;
 out = zeros(Ly, Lx, n, 'uint8');
 noisy = nargin > 3 && sensor_noise > 0;
 has_imp = isfield(cam, 'imp') && ~isempty(cam.imp);
+has_op = isfield(cam, 'op') && ~isempty(cam.op);
+has_oof = has_op && ~isempty(cam.op.oof);
+save_oof = has_oof && ~isempty(cam.op.oof.save_file);
 for k = 1:n
     [fx, fy] = within_session_field(cam.mo, frames(k), cam.xs, cam.ys, cam.B);
     if has_imp && cam.imp.I.index(frames(k)) > 0
         fine = impact_frame(double(FV(:, :, k)), frames(k), cam, fx, fy);
     else
         scene = cam.My * double(FV(:, :, k)) * cam.Mx.';
-        fine = interp2(scene, cam.Xf - s*fx, cam.Yf - s*fy, 'linear', 0);
+        if has_oof
+            [fine, L] = camera_layer_frame(scene, double(FV(:, :, k)), frames(k), cam, fx, fy);
+            if save_oof
+                h5write(cam.op.oof.save_file, '/L', L, [1 1 frames(k)], [Ly Lx 1]);
+            end
+        else
+            fine = interp2(scene, cam.Xf - s*fx, cam.Yf - s*fy, 'linear', 0);
+        end
     end
     binned = squeeze(mean(mean(reshape(fine, s, Ly, s, Lx), 1), 3));
+    if has_op
+        binned = camera_optics_frame(binned, frames(k), cam.op);
+    end
     if noisy
         binned = binned + sensor_noise * randn(rs, Ly, Lx);
+        if has_op && ~isempty(cam.op.hot_idx)
+            h = cam.op.hot_idx;
+            binned(h) = binned(h) + cam.op.hot_std .* randn(cam.op.rs_hot, numel(h), 1);
+        end
     end
     out(:, :, k) = uint8(binned);
 end
