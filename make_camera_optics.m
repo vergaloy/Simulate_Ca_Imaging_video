@@ -39,10 +39,35 @@ function op = make_camera_optics(frame_size, T, p, seed)
 %   sensor = light .* (1 + prnu) + offset                   (1 + global(t)) *
 %   frame  = uint8(sensor + noise)                          (1 + sum_k c_k(t) M_k)
 %
-% offset = row + column + dsnu + hot. Every group draws from a stream of its
-% own (seed + 8100 sensor, 8200 dust, 8300 vignetting, 8400 out-of-focus
-% layer, 8500 brightness; 8600 the hot pixels' noise, per frame), so switching
-% one on changes nothing else, and a run without them is bit for bit the same.
+% offset = row + column + dsnu + hot + black level. Every group draws from a
+% stream of its own (seed + 8100 sensor, 8200 dust, 8300 vignetting, 8400
+% out-of-focus layer, 8500 brightness; 8600 the hot pixels' noise, per frame;
+% 8700 black level, 8800 the ADC), so switching one on changes nothing else,
+% and a run without them is bit for bit the same.
+%
+% Read-out (S24), fixed to the camera:
+%   black level     the sensor's pedestal, grey levels added to the offset:
+%                   with no light a pixel reads it, still noisy, so dark
+%                   corners do not clip at 0
+%   ADC gain        the camera digitises in steps of g grey (integer codes k)
+%                   and multiplies by a digital gain g > 1 before the 8-bit
+%                   frame: frame = round(g k + c), k = round((sensor + noise -
+%                   c) / g), so one 8-bit code in every g / (g - 1) is never
+%                   used (missing codes; the real recordings skip one in 7).
+%                   Where the noise is under a few grey, the expected frame is
+%                   the scene plus a sawtooth of period g / (g - 1) grey of the
+%                   scene's own grey level: a smooth background (the
+%                   vignetting) shows its iso-grey contours as terraces, which
+%                   background removal turns into concentric rings fixed to the
+%                   camera. The noise dithers them away (amplitude times
+%                   exp(-2 pi^2 s^2 (g - 1)^2 / g^2), s the noise std at the
+%                   ADC). With adc_subpixels n > 1 each simulated pixel is
+%                   read by n x n sensor pixels (noise n times the pixel's,
+%                   each digitised to its 8-bit code, the codes averaged), as
+%                   a recording binned n x n: the terraces are then damped
+%                   by the sensor pixel's noise, as in the real chain. The
+%                   fixed pattern (prnu, dsnu, rows, columns) dithers them
+%                   too: at the real level it is 0.4-1 grey per pixel.
 %
 % Inputs:
 %   frame_size - [d1 d2], the saved frame the camera records
@@ -53,7 +78,9 @@ function op = make_camera_optics(frame_size, T, p, seed)
 %   V, D, prnu, dsnu [d1 d2]; row [d1 1]; col [1 d2]; hot_idx, hot_offset,
 %   hot_std [n 1]; VD = V .* D; P = 1 + prnu; O = offset map;
 %   gain_global, gain_trend [1 T]; gain_maps [d1 d2 K]; gain_coef [K T];
-%   oof (struct or []); params (every drawn value); rs_hot (RandStream).
+%   oof (struct or []); params (every drawn value); rs_hot (RandStream);
+%   black_level (grey, 0 = none, also in O); adc_gain (1 = none), adc_offset,
+%   adc_subpixels.
 %
 % Author: Pablo Vergara
 
@@ -63,7 +90,8 @@ vis_r = inset + 1:d1 - inset; vis_c = inset + 1:d2 - inset;   % what is kept
 op = struct('V', [], 'D', [], 'prnu', [], 'dsnu', [], 'row', [], 'col', [], ...
     'hot_idx', zeros(0, 1), 'hot_offset', zeros(0, 1), 'hot_std', zeros(0, 1), ...
     'gain_global', [], 'gain_trend', [], 'gain_maps', [], 'gain_coef', [], ...
-    'oof', [], 'params', struct(), 'VD', 1, 'P', 1, 'O', 0, 'rs_hot', []);
+    'oof', [], 'params', struct(), 'VD', 1, 'P', 1, 'O', 0, 'rs_hot', [], ...
+    'black_level', 0, 'adc_gain', 1, 'adc_offset', 0, 'adc_subpixels', 1);
 
 %% Sensor: hot pixels and the fixed pattern (seed + 8100)
 if p.hot_pixels || p.sensor_pattern
@@ -242,6 +270,28 @@ end
 
 %% The hot pixels' own noise, one draw per frame (seed + 8600)
 op.rs_hot = RandStream('mt19937ar', 'Seed', seed + 8600);
+
+%% Black level (seed + 8700): a pedestal on the offset
+if any(p.black_level(:) > 0)
+    rs = RandStream('mt19937ar', 'Seed', seed + 8700);
+    op.black_level = uniform(rs, p.black_level);
+    op.O = op.O + op.black_level;
+    op.params.black_level = op.black_level;
+end
+
+%% The ADC's digital gain (seed + 8800): missing codes, terraces
+if any(p.adc_gain(:) ~= 1)
+    rs = RandStream('mt19937ar', 'Seed', seed + 8800);
+    has = rand(rs) < p.adc_gain_prob;
+    g = uniform(rs, p.adc_gain);
+    c = g * rand(rs);
+    if has && g ~= 1
+        op.adc_gain = g; op.adc_offset = c;
+        op.adc_subpixels = max(1, round(p.adc_subpixels));
+    end
+    op.params.adc_gain = op.adc_gain; op.params.adc_offset = op.adc_offset;
+    op.params.adc_subpixels = op.adc_subpixels;
+end
 end
 
 function x = uniform(rs, r)
