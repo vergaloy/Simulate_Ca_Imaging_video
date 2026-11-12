@@ -1,4 +1,4 @@
-function R = real_ranges(F, seed, fps)
+function R = real_ranges(F, seed, fps, baseline)
 %% The 'real' defaults (S28): every condition at the real range, x 1.2.
 %
 % Pablo, 2026-11-12: "the range of simulated condition [is] 1.2 the real
@@ -21,7 +21,7 @@ function R = real_ranges(F, seed, fps)
 %     session together, as they belong to one camera and one preparation.
 %
 % Inputs: F frames, seed (the movie's), fps (the clock for every rate: 20,
-% the recordings'). All draws come from a stream of their own, seed + 8950,
+% the recordings'), baseline (the simulator's 'B', for the scene's contrast). All draws come from a stream of their own, seed + 8950,
 % in a fixed order, so every run of one movie (moving, twins, noise-free)
 % gets the same values.
 %
@@ -34,13 +34,20 @@ function R = real_ranges(F, seed, fps)
 %              pixels, vignetting, flicker, trend, exposure
 %   moving   - the moving run's only: slow drift, jolts, glitches
 %   motion   - the fast motion at the real range (shake, broad bends; no
-%              regimes or jumps): the driver's motion setting 'real'
+%              regimes or jumps): the driver's motion setting 'real'; not in
+%              nv (direct calls keep the simulator's own motion defaults)
 %   noise    - the sensor noise (grey, at the simulated pixel)
 %   draw     - which session each table gave and its factors
 %
 % Author: Pablo Vergara
 
 if nargin < 3 || isempty(fps), fps = 20; end
+if nargin < 4 || isempty(baseline), baseline = 1; end
+% The tissue's fine contrast per baseline image (S28: the 1.5-6 px band over
+% its local mean, lit area; real 0.80-1.25 %): baselines 1-7 fall inside the
+% real range x 1.2 as they are; baseline 8 (1.85-2.04 %) gets a gain under 1.
+BASELINE_CONTRAST = [1 1 1 1 1 1 1 0.5];
+k_contrast = BASELINE_CONTRAST(min(max(round(baseline), 1), numel(BASELINE_CONTRAST)));
 here = fileparts(mfilename('fullpath'));
 Tb = load(fullfile(here, 'real_sessions_control.mat'));
 rs = RandStream('mt19937ar', 'Seed', seed + 8950);
@@ -100,6 +107,7 @@ camera = { ...
 
 scene = { ...
     'smooth_background', true, ...                     % a real scene is not rounded before the camera
+    'scene_contrast', k_contrast, ...                  % baseline 8 only (S28)
     'scene_noise', false, ...                          % the noise is the sensor's (v2)
     'burst_rate', pk.burst_rate, 'burst_fps', fps, ... % S25: 2.5-13.9 per minute
     'burst_glow_source', 'background', ...             % S25: the light is diffuse (somas 0-8 %)
@@ -134,7 +142,10 @@ motion = { ...
     'within_session_nonrigid_grid', 3, ...
     'within_session_rigid_frames', [], 'within_session_local_bends', 0, 'within_session_jumps', 0};
 
-R = struct('nv', {[scene, camera, moving, motion, {'sensor_noise', c.sensor_noise}]}, ...
+% The fast motion is not filled in for direct calls (nv): until Pablo decides,
+% the within-session motion keeps the simulator's own defaults; a caller that
+% wants it passes R.motion (the regimes driver's motion_set 'real').
+R = struct('nv', {[scene, camera, moving, {'sensor_noise', c.sensor_noise}]}, ...
     'scene', {scene}, 'camera', {camera}, 'moving', {moving}, 'motion', {motion}, ...
     'noise', c.sensor_noise, 'draw', draw);
 end

@@ -1264,7 +1264,7 @@ s.Seed
 % The real ranges (S28) for every option the caller left out.
 opt.ranges = char(opt.ranges);
 if strcmp(opt.ranges, 'real')
-    R = real_ranges(opt.F, opt.seed, opt.ranges_fps);
+    R = real_ranges(opt.F, opt.seed, opt.ranges_fps, opt.B(1));
     nv = R.nv;
     for k = 1:2:numel(nv)
         if any(strcmp(inp.UsingDefaults, nv{k}))
