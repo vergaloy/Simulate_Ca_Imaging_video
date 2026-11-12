@@ -101,8 +101,11 @@ for k = 1:n
         end
         nq = cam.op.adc_subpixels;
         acc = zeros(Ly, Lx);
+        has_sub = isfield(cam.op, 'dsnu_sub') && ~isempty(cam.op.dsnu_sub);
         for q = 1:nq^2
-            acc = acc + double(uint8(adc_read(binned + nq * sensor_noise * randn(rs, Ly, Lx), cam.op)));
+            v = binned + nq * sensor_noise * randn(rs, Ly, Lx);
+            if has_sub, v = v + cam.op.dsnu_sub(:, :, q); end   % S28: per sensor pixel
+            acc = acc + double(uint8(adc_read(v, cam.op)));
         end
         binned = acc / nq^2;
     else

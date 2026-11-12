@@ -1024,6 +1024,12 @@ addParameter(inp, 'black_level', 0, valid_v)
 addParameter(inp, 'adc_gain', 1, valid_v)
 addParameter(inp, 'adc_gain_prob', 1, valid_v)
 addParameter(inp, 'adc_subpixels', 1, valid_v)
+% sensor_pattern_subpixels (S28): with the read-out by adc_subpixels n > 1,
+%   the offset texture per sensor pixel (std n * sensor_dsnu, its n x n mean
+%   the simulated pixel's), as the real fixed pattern is: it dithers each
+%   sensor pixel's missing codes (seed + 8810 + session). false (default) =
+%   the texture at the simulated pixel only.
+addParameter(inp, 'sensor_pattern_subpixels', false, valid_bool)
 % --- Sensor noise (optional, off) ------------------------------------------
 % sensor_noise: standard deviation, in grey levels, of white Gaussian noise
 %   added to every recorded frame after the motion, independent per pixel and
@@ -1481,7 +1487,8 @@ names = {'hot_pixels', 'hot_pixel_fraction', 'hot_pixel_offset', 'hot_pixel_spre
     'oof_layer_file', 'flicker', 'flicker_rms', 'flicker_smoothness', 'flicker_maps', ...
     'flicker_map_rms', 'flicker_map_scale', 'brightness_trend', 'trend_change', 'trend_tau', ...
     'black_level', 'adc_gain', 'adc_gain_prob', 'adc_subpixels', ...
-    'trend_minutes', 'flicker_slow_rms', 'flicker_slow_smoothness', 'exposure'};
+    'trend_minutes', 'flicker_slow_rms', 'flicker_slow_smoothness', 'exposure', ...
+    'sensor_pattern_subpixels'};
 p = struct('fov_inset', opt.camera_fov_inset);
 for k = 1:numel(names)
     p.(names{k}) = opt.(names{k});

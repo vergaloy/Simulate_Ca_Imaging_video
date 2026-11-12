@@ -305,6 +305,23 @@ if any(p.adc_gain(:) ~= 1)
     op.params.adc_subpixels = op.adc_subpixels;
 end
 
+%% The fixed pattern per sensor pixel (S28; seed + 8810)
+% The real fixed pattern lives at the sensor pixel: 0.8-1.8 grey per sensor
+% pixel, 0.4-1.0 once binned 2 x 2 (S24). With the read-out by n x n sensor
+% pixels, each sensor pixel gets the simulated pixel's offset texture plus a
+% deviation of its own (zero-sum over the n x n, so the binned pattern is
+% unchanged), std n * dsnu in all: it dithers each sensor pixel's missing
+% codes as the real one does. Used only by the noisy read-out (the
+% noise-free twins read the simulated pixel once, as before).
+if isfield(p, 'sensor_pattern_subpixels') && p.sensor_pattern_subpixels && ...
+        ~isempty(op.dsnu) && op.adc_subpixels > 1
+    rs = RandStream('mt19937ar', 'Seed', seed + 8810);
+    nq = op.adc_subpixels;
+    dev = nq * op.params.dsnu_std * randn(rs, d1, d2, nq^2);
+    op.dsnu_sub = dev - mean(dev, 3);
+    op.params.dsnu_subpixel_std = nq * op.params.dsnu_std;
+end
+
 %% Exposure (S28; seed + 8960): a gain on the light, folded into VD
 if isfield(p, 'exposure') && any(p.exposure(:) ~= 1)
     rs = RandStream('mt19937ar', 'Seed', seed + 8960);
