@@ -100,6 +100,26 @@ for i = 2:opt.ses
     [BL(:,:,i), A{1,i}, bA{1,i}, Mot{i}] = Add_NRmotion(bl(:,:,i), A_GT{i}, bA_GT{i}, ...
         opt.across_session_nonrigid, opt.plotme, opt.across_session_translation, opt.across_session_nonrigid_scale);
 end
+% Scene contrast (S28): the baseline's structure finer than
+% scene_contrast_sigma px (vessels, the tissue's texture) times a gain, drawn
+% per session (log-uniform, seed + 8980 + session) from a range; the
+% simulated scene had 3-5 times less band-passed contrast than real tissue
+% (S20). 1 (default) = none.
+if any(opt.scene_contrast(:) ~= 1)
+    opt.scene_contrast_drawn = zeros(1, opt.ses);
+    for i = 1:opt.ses
+        k = opt.scene_contrast(:)';
+        if numel(k) > 1 && k(1) ~= k(end)
+            rs_k = RandStream('mt19937ar', 'Seed', session_seed(opt, 8980, i));
+            k = exp(log(k(1)) + rand(rs_k) * (log(k(end)) - log(k(1))));
+        else
+            k = k(1);
+        end
+        L = imgaussfilt(double(BL(:, :, i)), opt.scene_contrast_sigma);
+        BL(:, :, i) = L + k * (double(BL(:, :, i)) - L);
+        opt.scene_contrast_drawn(i) = k;
+    end
+end
 if opt.smooth_background
     BL = to_grey(BL);  % the same grey scale, not rounded
 else
@@ -1102,6 +1122,12 @@ addParameter(inp, 'slow_bg_amp', 0, valid_v)   % Slow cyclic baseline of the bac
 %   nothing rounds (no motion, no camera, no sensor noise) is written as it is,
 %   in double (h5; AVI rounds it).
 addParameter(inp, 'smooth_background', false, valid_bool)
+% scene_contrast (S28): a gain on the baseline's structure finer than
+%   scene_contrast_sigma px (a value, or a range drawn per session,
+%   log-uniform). 1 (default) = none. Real tissue has 2.4-4.2 % band-passed
+%   contrast (3-12 px, over the mean grey; S20), the simulated scene 0.8-1 %.
+addParameter(inp, 'scene_contrast', 1, valid_v)
+addParameter(inp, 'scene_contrast_sigma', 12, valid_v)
 % --- Activity bursts (optional, off) ---------------------------------------
 % Periods of strong, synchronised, epileptic-like activity (make_bursts): many
 % neurons fire together in rhythmic discharges for seconds, over the whole

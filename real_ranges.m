@@ -33,6 +33,8 @@ function R = real_ranges(F, seed, fps)
 %   camera   - fixed to the camera (the camera runs): read-out, pattern, hot
 %              pixels, vignetting, flicker, trend, exposure
 %   moving   - the moving run's only: slow drift, jolts, glitches
+%   motion   - the fast motion at the real range (shake, broad bends; no
+%              regimes or jumps): the driver's motion setting 'real'
 %   noise    - the sensor noise (grey, at the simulated pixel)
 %   draw     - which session each table gave and its factors
 %
@@ -63,6 +65,11 @@ f.flicker_slow_smoothness = smooth_jitter(Tb.flicker.flicker_slow_smoothness(dra
 % Jolts: a count per movie from the drawn rate per hour (Poisson).
 n_jolts = poisson(rs, j.jolts_per_hour * minutes / 60);
 draw.minutes = minutes;
+% The fast motion (drawn last, so every draw above is as before it existed):
+% the shake's std and AR(1) coefficient, its cap, the bends' std, from one of
+% S4's 11 clean sessions.
+[mo, draw.motion] = session(rs, Tb.motion, {'shake_std', 'shake_smoothness', 'motion_max', 'bend_std'});
+mo.shake_smoothness = smooth_jitter(Tb.motion.shake_smoothness(draw.motion.index), draw.motion.factor(2));
 
 camera = { ...
     'camera_supersample', 5, ...                       % v2's camera (sub-pixel averaging)
@@ -115,8 +122,20 @@ moving = { ...
     'jolt_defocus', 0, 'jolt_brightness', [0.02 0.2], ...
     'glitches', g.glitches, 'glitch_run', [1 8 * 1.2]};             % S4: runs of 1-8 frames
 
-R = struct('nv', {[scene, camera, moving, {'sensor_noise', c.sensor_noise}]}, ...
-    'scene', {scene}, 'camera', {camera}, 'moving', {moving}, ...
+% The fast motion at the real range (S4): a stationary shake and broad bends,
+% no regimes, no local bends, no jumps (the rare real events are the jolts
+% above). The regimes driver offers it as its motion setting 'real' beside
+% movie v2's regimes ('v2').
+motion = { ...
+    'within_session_translation_std', mo.shake_std, ...      % S4: fast 99th pct 0.45-1.69 px / 3.035
+    'within_session_motion_smoothness', mo.shake_smoothness, ... % S4: from the step's 99.9th pct
+    'within_session_motion_max', mo.motion_max, ...           % S4: largest displacement 1.56-4.6 px
+    'within_session_nonrigid_std', mo.bend_std, ...           % S4: non-affine residual 0.12-0.74 px
+    'within_session_nonrigid_grid', 3, ...
+    'within_session_rigid_frames', [], 'within_session_local_bends', 0, 'within_session_jumps', 0};
+
+R = struct('nv', {[scene, camera, moving, motion, {'sensor_noise', c.sensor_noise}]}, ...
+    'scene', {scene}, 'camera', {camera}, 'moving', {moving}, 'motion', {motion}, ...
     'noise', c.sensor_noise, 'draw', draw);
 end
 
