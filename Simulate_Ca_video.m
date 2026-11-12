@@ -190,7 +190,8 @@ GT_drift = cell(1, opt.ses); GT_jolts = cell(1, opt.ses); GT_glitches = cell(1, 
 op_p = optics_options(opt);
 use_optics = op_p.hot_pixels || op_p.sensor_pattern || op_p.dust || ...
     op_p.vignetting || op_p.oof_layer || op_p.flicker || op_p.brightness_trend || ...
-    any(op_p.black_level(:) > 0) || any(op_p.adc_gain(:) ~= 1);
+    any(op_p.black_level(:) > 0) || any(op_p.adc_gain(:) ~= 1) || ...
+    any(op_p.exposure(:) ~= 1) || ~isempty(opt.exposure_target);
 use_camera = use_camera || use_optics;
 GT_optics = cell(1, opt.ses);
 
@@ -451,6 +452,14 @@ for i = progress(1:opt.ses)
                 cam_i.jolt = struct('J', J_i, 'LB', scale_a * LBj0);
             else
                 cam_i.jolt = [];
+            end
+            if start_idx == 1 && use_optics && ~isempty(opt.exposure_target)
+                % S28: the exposure that gives the light's lit-area mean the
+                % target grey level, from this still scene (the same in every
+                % run of the movie), folded into the camera's VD.
+                [cam_i.op, GT_optics{i}] = set_exposure(cam_i.op, GT_optics{i}, ...
+                    mean(double(FV_batch), 3), opt.exposure_target, opt.camera_fov_inset, ...
+                    session_seed(opt, 8970, i));
             end
             FV_batch = apply_camera_motion(FV_batch, batch_frames, cam_i, ...
                 opt.sensor_noise, rs_noise);
@@ -969,6 +978,28 @@ addParameter(inp, 'flicker_map_scale', [30 150], valid_v)
 addParameter(inp, 'brightness_trend', false, valid_bool)
 addParameter(inp, 'trend_change', [-0.3 0.05], valid_v)
 addParameter(inp, 'trend_tau', [0.1 2], valid_v)
+% trend_minutes (S28): the minutes the session spans; then trend_change is the
+%   change per 15 min (a real session's length), scaled to the session's own
+%   minutes. [] (default) = trend_change is the change at the last frame.
+% flicker_slow_rms, flicker_slow_smoothness (S28): a second, slow uniform
+%   flicker, a stationary AR(1) gain of that RMS and coefficient (not rescaled
+%   to the session, so a short session sees the part of it a real recording
+%   would), on top of the fast one (flicker_rms, flicker_smoothness). 0
+%   (default) = none. Real (S28, 16 sessions): fast 0.4-1.2 % RMS with
+%   coefficient 0.92-0.97, slow 0-2.8 % with 0.99-0.999 at 20 frames/s.
+addParameter(inp, 'trend_minutes', [], @(x) isempty(x) || (isnumeric(x) && isscalar(x) && x > 0))
+addParameter(inp, 'flicker_slow_rms', 0, valid_v)
+addParameter(inp, 'flicker_slow_smoothness', 0.995, valid_v)
+% exposure (S28): a gain on the light (the LED and the sensor's exposure), a
+%   value or a range drawn per session (seed + 8960 + session). 1 (default) =
+%   none. exposure_target: instead, the grey level the light's mean over the
+%   lit area (above half the smoothed peak of the session's first batch, after
+%   the vignetting and the dust, before the black level) should have; the gain
+%   is computed from the still scene, the same in every run (a range: drawn
+%   per session, seed + 8970 + session). [] (default) =
+%   none. Real (S28): 41-87 grey; the simulated scene alone is about twice that.
+addParameter(inp, 'exposure', 1, valid_v)
+addParameter(inp, 'exposure_target', [], @(x) isempty(x) || isnumeric(x))
 % black_level: the sensor's pedestal, grey levels added to every pixel's offset
 %   before the noise and the rounding, so pixels with no light read it, stay
 %   noisy and do not clip at 0. A range [a b] is drawn per session (uniform,
@@ -1154,6 +1185,17 @@ addParameter(inp, 'save_avi', 1)               % Save as avi. otherwise save as 
 addParameter(inp, 'scale', 1)                  % Resize the dimensions of A
 addParameter(inp, 'save_mat', 1, valid_bool)   % Whether to save metadata (.mat) files
 addParameter(inp, 'save_GT', 1, valid_bool)    % Whether to save GT video
+% --- Ranges (S28) ----------------------------------------------------------
+% ranges: 'real' (default) fills every option the caller leaves out with the
+%   real control recordings' value or range, times 1.2 (real_ranges.m: the
+%   camera's read-out with its missing codes, the real noise, fixed pattern,
+%   exposure, ring-free vignetting, hot pixels, flicker, trend, slow drift, the
+%   brightness peaks, a smooth scene; glitches and jolts at the real rates;
+%   one real session drawn per movie for what was measured per session).
+%   'legacy': the defaults before S28, under which every older movie (v2, the
+%   600-frame default, the optics demo) is made again bit for bit.
+addParameter(inp, 'ranges', 'real', @(x) any(strcmp(x, {'real', 'legacy'})))
+addParameter(inp, 'ranges_fps', 20, valid_v)
 varargin=varargin{1, 1};
 
 reject_renamed_options(varargin);
@@ -1187,6 +1229,18 @@ while 1
 end
 s.Seed
 
+% The real ranges (S28) for every option the caller left out.
+opt.ranges = char(opt.ranges);
+if strcmp(opt.ranges, 'real')
+    R = real_ranges(opt.F, opt.seed, opt.ranges_fps);
+    nv = R.nv;
+    for k = 1:2:numel(nv)
+        if any(strcmp(inp.UsingDefaults, nv{k}))
+            opt.(nv{k}) = nv{k + 1};
+        end
+    end
+    opt.real_draw = R.draw;
+end
 end
 
 function  outpath=get_out_path(opt)
@@ -1393,6 +1447,28 @@ if opt.drift==1
 end
 end
 
+function [op, G] = set_exposure(op, G, still, target, inset, seed)
+% The gain that brings the light's mean over the lit area (the smoothed light
+% above half its peak, inside the field of view) to the target grey level
+% (S28); a range [a b] is drawn per session (uniform). Folded into VD.
+if numel(target) > 1 && target(1) ~= target(end)
+    rs = RandStream('mt19937ar', 'Seed', seed);
+    target = target(1) + rand(rs) * (target(end) - target(1));
+else
+    target = target(1);
+end
+inset = max(0, round(inset));
+L = still .* op.VD;
+L = L(inset + 1:end - inset, inset + 1:end - inset);
+sm = imgaussfilt(L, 8);
+lit = sm > 0.5 * max(sm(:));
+e = target / mean(L(lit));
+op.VD = op.VD * e;
+op.exposure = e;
+op.params.exposure = e; op.params.exposure_target = target;
+G.VD = op.VD; G.exposure = e; G.params = op.params;
+end
+
 function p = optics_options(opt)
 % The options make_camera_optics reads (camera_fov_inset as fov_inset).
 names = {'hot_pixels', 'hot_pixel_fraction', 'hot_pixel_offset', 'hot_pixel_spread', ...
@@ -1404,7 +1480,8 @@ names = {'hot_pixels', 'hot_pixel_fraction', 'hot_pixel_offset', 'hot_pixel_spre
     'oof_gain', 'oof_lag', 'oof_walk', 'oof_walk_smoothness', 'oof_walk_max', ...
     'oof_layer_file', 'flicker', 'flicker_rms', 'flicker_smoothness', 'flicker_maps', ...
     'flicker_map_rms', 'flicker_map_scale', 'brightness_trend', 'trend_change', 'trend_tau', ...
-    'black_level', 'adc_gain', 'adc_gain_prob', 'adc_subpixels'};
+    'black_level', 'adc_gain', 'adc_gain_prob', 'adc_subpixels', ...
+    'trend_minutes', 'flicker_slow_rms', 'flicker_slow_smoothness', 'exposure'};
 p = struct('fov_inset', opt.camera_fov_inset);
 for k = 1:numel(names)
     p.(names{k}) = opt.(names{k});

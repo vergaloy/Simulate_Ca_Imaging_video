@@ -42,7 +42,7 @@ function op = make_camera_optics(frame_size, T, p, seed)
 % offset = row + column + dsnu + hot + black level. Every group draws from a
 % stream of its own (seed + 8100 sensor, 8200 dust, 8300 vignetting, 8400
 % out-of-focus layer, 8500 brightness; 8600 the hot pixels' noise, per frame;
-% 8700 black level, 8800 the ADC), so switching one on changes nothing else,
+% 8700 black level, 8800 the ADC, 8960 the exposure), so switching one on changes nothing else,
 % and a run without them is bit for bit the same.
 %
 % Read-out (S24), fixed to the camera:
@@ -261,10 +261,22 @@ if p.flicker || p.brightness_trend
     end
     if p.brightness_trend
         change = uniform(rs, p.trend_change);
+        if isfield(p, 'trend_minutes') && ~isempty(p.trend_minutes)
+            change = change * p.trend_minutes / 15;      % S28: per 15 min, the real sessions'
+        end
         tau = uniform(rs, p.trend_tau) * T;
         t = 0:T - 1;
         op.gain_trend = 1 + change * (1 - exp(-t / tau)) / (1 - exp(-(T - 1) / tau));
         op.params.trend_change = change; op.params.trend_tau_frames = tau;
+    end
+    if p.flicker && isfield(p, 'flicker_slow_rms') && any(p.flicker_slow_rms(:) > 0)
+        % S28: a slow uniform flicker on top, a stationary AR(1) (not rescaled
+        % to the session), drawn after everything above.
+        rms_s = uniform(rs, p.flicker_slow_rms);
+        phi_s = uniform(rs, p.flicker_slow_smoothness);
+        x = rms_s * stationary_ar1(rs, T, phi_s);
+        op.gain_global = (1 + op.gain_global) .* (1 + x) - 1;
+        op.params.flicker_slow_rms = rms_s; op.params.flicker_slow_smoothness = phi_s;
     end
 end
 
@@ -292,6 +304,15 @@ if any(p.adc_gain(:) ~= 1)
     op.params.adc_gain = op.adc_gain; op.params.adc_offset = op.adc_offset;
     op.params.adc_subpixels = op.adc_subpixels;
 end
+
+%% Exposure (S28; seed + 8960): a gain on the light, folded into VD
+if isfield(p, 'exposure') && any(p.exposure(:) ~= 1)
+    rs = RandStream('mt19937ar', 'Seed', seed + 8960);
+    e = uniform(rs, p.exposure);
+    op.VD = op.VD * e;
+    op.exposure = e;
+    op.params.exposure = e;
+end
 end
 
 function x = uniform(rs, r)
@@ -318,6 +339,17 @@ if numel(r) == 1 || r(1) == r(end)
     n = r(1);
 else
     n = r(1) + floor(rand(rs) * (r(end) - r(1) + 1));
+end
+end
+
+function a = stationary_ar1(rs, T, phi)
+% An AR(1) series of unit stationary std, started in its stationary law.
+e = randn(rs, 1, T);
+a = zeros(1, T);
+a(1) = e(1);
+c = sqrt(1 - phi^2);
+for t = 2:T
+    a(t) = phi * a(t - 1) + c * e(t);
 end
 end
 
